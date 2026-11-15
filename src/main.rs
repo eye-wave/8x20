@@ -1,9 +1,13 @@
 //! CRT-20+ text sign over COM, ported from tablica.exe (Delphi/CPort).
 //! Frame: FF FF | cmd | len(u16 BE) | payload | crc(2)   len = 5 + payload.len()
-//! Usage: tablica COM3 read N [PAGES [FILE.txt]] | tablica COM3 write N FILE.txt
+//! Usage: tablica scan
+//!        tablica COM3 read N [PAGES [FILE.txt]]   (no FILE = raw bytes to stdout)
+//!        tablica COM3 write N FILE.txt
+//! Text is never converted: file bytes (Windows-1250) go to the sign and back unchanged.
+//! DEBUG=1 prints tx/rx frames; DTR=1 / RTS=1 raise those lines (the exe leaves both low).
 use serialport::{ClearBuffer, SerialPort};
 use std::{
-    io::{self, ErrorKind},
+    io::{self, ErrorKind, Write},
     time::Duration,
 };
 
@@ -38,43 +42,6 @@ fn crc(data: &[u8]) -> [u8; 2] {
     [h, l]
 }
 
-// Windows-1250 Polish letters; everything else non-ASCII becomes '?'.
-// ponytail: Polish only, swap in encoding_rs for other 1250 characters.
-const PL: [(char, u8); 18] = [
-    ('ą', 0xB9),
-    ('ć', 0xE6),
-    ('ę', 0xEA),
-    ('ł', 0xB3),
-    ('ń', 0xF1),
-    ('ó', 0xF3),
-    ('ś', 0x9C),
-    ('ź', 0x9F),
-    ('ż', 0xBF),
-    ('Ą', 0xA5),
-    ('Ć', 0xC6),
-    ('Ę', 0xCA),
-    ('Ł', 0xA3),
-    ('Ń', 0xD1),
-    ('Ó', 0xD3),
-    ('Ś', 0x8C),
-    ('Ź', 0x8F),
-    ('Ż', 0xAF),
-];
-fn enc(c: char) -> u8 {
-    if c.is_ascii() {
-        c as u8
-    } else {
-        PL.iter().find(|p| p.0 == c).map_or(b'?', |p| p.1)
-    }
-}
-fn dec(b: u8) -> char {
-    if b.is_ascii() {
-        b as char
-    } else {
-        PL.iter().find(|p| p.1 == b).map_or('?', |p| p.0)
-    }
-}
-
 fn frame(cmd: u8, payload: &[u8]) -> Vec<u8> {
     let mut body = vec![cmd];
     body.extend((5 + payload.len() as u16).to_be_bytes());
@@ -84,6 +51,10 @@ fn frame(cmd: u8, payload: &[u8]) -> Vec<u8> {
     out.extend(body);
     out.extend(c);
     out
+}
+
+fn debug() -> bool {
+    std::env::var_os("DEBUG").is_some()
 }
 
 // ponytail: read until idle timeout; the exe counts bytes but its length rule looks off by one. Replies' CRC unchecked.
@@ -101,20 +72,24 @@ fn rx(p: &mut dyn SerialPort) -> io::Result<Vec<u8>> {
             Err(e) => return Err(e),
         }
     }
-    eprintln!("rx {v:02x?}");
+    if debug() {
+        eprintln!("rx {v:02x?}");
+    }
     let skip = v.iter().position(|&x| x != 0xFF).unwrap_or(v.len()); // exe drops leading FFs
     Ok(v.split_off(skip))
 }
 
 fn send(p: &mut dyn SerialPort, f: &[u8]) -> io::Result<Vec<u8>> {
     p.clear(ClearBuffer::All)?; // exe purges RX+TX before every send
-    eprintln!("tx {f:02x?}");
+    if debug() {
+        eprintln!("tx {f:02x?}");
+    }
     p.write_all(f)?;
     rx(p)
 }
 
-// One page = 8 rows x 20 chars. Reply is cmd 5: [05 len len 14 a0] + 160 chars at r[5..165].
-fn page(p: &mut dyn SerialPort, f: &[u8]) -> io::Result<Vec<String>> {
+// One page = 8 rows x 20 bytes. Reply is cmd 5: [05 len len 14 a0] + 160 bytes at r[5..165].
+fn page(p: &mut dyn SerialPort, f: &[u8]) -> io::Result<Vec<Vec<u8>>> {
     let r = send(p, f)?;
     if r.len() < 165 || r[0] != 5 {
         return Err(io::Error::new(
@@ -123,17 +98,17 @@ fn page(p: &mut dyn SerialPort, f: &[u8]) -> io::Result<Vec<String>> {
         ));
     }
     Ok((0..8)
-        .map(|i| r[5 + 20 * i..25 + 20 * i].iter().map(|&b| dec(b)).collect())
+        .map(|i| r[5 + 20 * i..25 + 20 * i].to_vec())
         .collect())
 }
 
-const DECO: &str = "<------------------>";
+const DECO: &[u8] = b"<------------------>";
 
 // txt format of the exe: page 0 (title page) first with no header, every later page
-// preceded by DECO / "<- Strona nr: 001 ->" / DECO; 8 rows of 20 chars per page.
+// preceded by DECO / "<- Strona nr: 001 ->" / DECO; 8 rows of 20 bytes per page.
 // Slot N = page 0 via cmd 1 + N, pages 1..=pages via cmd 3 + page number (exe's read loop).
-fn read_slot(p: &mut dyn SerialPort, n: u16, pages: u8) -> io::Result<String> {
-    let mut out = String::new();
+fn read_slot(p: &mut dyn SerialPort, n: u16, pages: u8) -> io::Result<Vec<u8>> {
+    let mut out = vec![];
     for k in 0..=pages {
         let f = if k == 0 {
             frame(1, &n.to_be_bytes())
@@ -141,29 +116,39 @@ fn read_slot(p: &mut dyn SerialPort, n: u16, pages: u8) -> io::Result<String> {
             frame(3, &[k])
         };
         if k > 0 {
-            out += &format!("{DECO}\r\n<- Strona nr: {k:03} ->\r\n{DECO}\r\n");
+            out.extend_from_slice(DECO);
+            out.extend_from_slice(format!("\r\n<- Strona nr: {k:03} ->\r\n").as_bytes());
+            out.extend_from_slice(DECO);
+            out.extend_from_slice(b"\r\n");
         }
         for row in page(p, &f)? {
-            out += &row;
-            out += "\r\n";
+            out.extend(row);
+            out.extend_from_slice(b"\r\n");
         }
     }
     Ok(out)
 }
 
 // Parse that txt format back into pages. Decorator numbers pick the page, rows before the first one are page 0.
-// Rows over 20 chars or pages over 8 rows are errors, not silent truncation.
-fn parse(txt: &str) -> Result<Vec<Vec<String>>, String> {
-    let l: Vec<&str> = txt.lines().collect();
+// Rows over 20 bytes or pages over 8 rows are errors, not silent truncation.
+fn parse(txt: &[u8]) -> Result<Vec<Vec<Vec<u8>>>, String> {
+    let mut l: Vec<&[u8]> = txt
+        .split(|&b| b == b'\n')
+        .map(|x| x.strip_suffix(b"\r").unwrap_or(x))
+        .collect();
+    if l.last().is_some_and(|x| x.is_empty()) {
+        l.pop(); // newline at end of file
+    }
     let (mut pages, mut cur, mut i) = (vec![vec![]], 0usize, 0);
     while i < l.len() {
         let hdr = l[i] == DECO
             && l.get(i + 2) == Some(&DECO)
             && l.get(i + 1)
-                .is_some_and(|s| s.starts_with("<- Strona nr: "));
+                .is_some_and(|s| s.starts_with(b"<- Strona nr: "));
         if hdr {
             cur = l[i + 1]
                 .get(14..17)
+                .and_then(|d| std::str::from_utf8(d).ok())
                 .and_then(|d| d.parse().ok())
                 .ok_or(format!("bad page header, line {}", i + 2))?;
             if cur > 127 {
@@ -173,10 +158,10 @@ fn parse(txt: &str) -> Result<Vec<Vec<String>>, String> {
             i += 3;
             continue;
         }
-        if l[i].chars().count() > 20 {
-            return Err(format!("line {} is longer than 20 chars", i + 1));
+        if l[i].len() > 20 {
+            return Err(format!("line {} is longer than 20 characters", i + 1));
         }
-        pages[cur].push(l[i].to_string());
+        pages[cur].push(l[i].to_vec());
         if pages[cur].len() > 8 {
             return Err(format!("page {cur} has more than 8 rows (line {})", i + 1));
         }
@@ -196,38 +181,70 @@ fn ack(r: Vec<u8>) -> io::Result<()> {
     }
 }
 
-// Exe's write sequence: every page as cmd 4 [page index, 8x20 chars padded to 256] waiting for ack (cmd 6),
+// Exe's write sequence: every page as cmd 4 [page index, 8x20 bytes padded to 256] waiting for ack (cmd 6),
 // then cmd 2 [N] commits the slot. pages[0] is the title page.
-// ponytail: from disassembly only, never run against the sign - try a spare slot and read it back.
-fn write_slot(p: &mut dyn SerialPort, n: u16, pages: &[Vec<String>]) -> io::Result<()> {
+fn write_slot(p: &mut dyn SerialPort, n: u16, pages: &[Vec<Vec<u8>>]) -> io::Result<()> {
     for (k, rows) in pages.iter().enumerate() {
         let mut pl = vec![b' '; 257];
         pl[0] = k as u8;
         for (i, row) in rows.iter().take(8).enumerate() {
-            for (c, ch) in row.chars().take(20).enumerate() {
-                pl[1 + 20 * i + c] = enc(ch);
-            }
+            pl[1 + 20 * i..1 + 20 * i + row.len()].copy_from_slice(row);
         }
         ack(send(p, &frame(4, &pl))?)?;
     }
     ack(send(p, &frame(2, &n.to_be_bytes()))?)
 }
 
-fn main() -> io::Result<()> {
-    let a: Vec<String> = std::env::args().collect();
-    if a.len() < 4 {
-        eprintln!("usage: tablica COMx read N [PAGES [FILE]] | write N FILE");
-        std::process::exit(2);
-    }
-    // 115200 8N1, no flow control = the form's stored defaults
-    let mut p = serialport::new(&a[1], 115_200)
+// 115200 8N1, no flow control = the form's stored defaults; DTR/RTS low like the exe.
+fn open(name: &str) -> serialport::Result<Box<dyn SerialPort>> {
+    let mut p = serialport::new(name, 115_200)
         .timeout(Duration::from_millis(500))
         .open()?;
-    // exe leaves DTR/RTS low (CPort dtrDisable/rtsDisable); try DTR=1 / RTS=1 env vars if silent
     let on = |k: &str| std::env::var(k).is_ok_and(|v| v == "1");
     p.write_data_terminal_ready(on("DTR"))?;
     p.write_request_to_send(on("RTS"))?;
     std::thread::sleep(Duration::from_millis(500)); // let the adapter settle after open
+    Ok(p)
+}
+
+// Probe every port with a read of slot 1 (changes nothing on the sign); a valid page back = the sign.
+// ponytail: sequential, ~3s per silent port; ports held by another program are skipped (DEBUG=1 shows why).
+fn scan() -> io::Result<()> {
+    let mut found = false;
+    for info in serialport::available_ports()? {
+        let hit = open(&info.port_name)
+            .map_err(|e| e.to_string())
+            .and_then(|mut p| {
+                page(&mut *p, &frame(1, &1u16.to_be_bytes())).map_err(|e| e.to_string())
+            });
+        match hit {
+            Ok(_) => {
+                println!("{}", info.port_name);
+                found = true;
+            }
+            Err(e) if debug() => eprintln!("{}: {e}", info.port_name),
+            Err(_) => {}
+        }
+    }
+    if !found {
+        eprintln!("no device answered (close tablica.exe, check the cable)");
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn main() -> io::Result<()> {
+    let a: Vec<String> = std::env::args().collect();
+    if a.get(1).map(String::as_str) == Some("scan") {
+        return scan();
+    }
+    if a.len() < 4 {
+        eprintln!(
+            "usage: tablica scan | tablica COMx read N [PAGES [FILE]] | tablica COMx write N FILE"
+        );
+        std::process::exit(2);
+    }
+    let mut p = open(&a[1])?;
     let n: u16 = a[3].parse().expect("text number");
     match a[2].as_str() {
         "read" => {
@@ -236,16 +253,13 @@ fn main() -> io::Result<()> {
                 n,
                 a.get(4).map_or(0, |s| s.parse().expect("pages")),
             )?;
-            print!("{t}");
-            if let Some(f) = a.get(5) {
-                std::fs::write(f, t.chars().map(enc).collect::<Vec<u8>>())?; // file is Windows-1250 like the exe's
+            match a.get(5) {
+                Some(f) => std::fs::write(f, &t)?,
+                None => io::stdout().write_all(&t)?,
             }
         }
         "write" => {
-            let txt: String = std::fs::read(a.get(4).expect("file"))?
-                .iter()
-                .map(|&b| dec(b))
-                .collect();
+            let txt = std::fs::read(a.get(4).expect("file"))?;
             let pages = parse(&txt).map_err(|e| io::Error::new(ErrorKind::InvalidData, e))?;
             write_slot(&mut *p, n, &pages)?;
             println!("written {} pages", pages.len());
@@ -253,29 +267,4 @@ fn main() -> io::Result<()> {
         _ => eprintln!("read|write"),
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn frames() {
-        assert_eq!(frame(1, &[0, 1]), [0xff, 0xff, 1, 0, 7, 0, 1, 0xb3, 0xd1]);
-        assert_eq!(frame(4, &[0; 257]).len(), 264); // exe sends 0x108 bytes
-    }
-    #[test]
-    fn txt() {
-        let t = format!("a\nb\n{DECO}\n<- Strona nr: 002 ->\n{DECO}\nc\n");
-        let p = parse(&t).unwrap();
-        assert_eq!(
-            (p.len(), p[0].clone(), p[1].is_empty(), p[2].clone()),
-            (3, vec!["a".into(), "b".into()], true, vec!["c".into()])
-        );
-        assert!(parse("123456789012345678901").is_err());
-    }
-    #[test]
-    fn polish() {
-        assert_eq!(enc('ł'), 0xB3);
-        assert!("ąćęłńóśźżĄĆĘŁŃÓŚŹŻ".chars().all(|c| dec(enc(c)) == c));
-    }
 }

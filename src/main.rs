@@ -5,67 +5,21 @@ use std::{cell::Cell, cell::RefCell, fs, path::PathBuf, rc::Rc, sync::mpsc};
 
 mod sign;
 
-const GREEN: u32 = 0x1f4d34;
-const BODY: u32 = 0xf3ecd6;
-const PANEL: u32 = 0xf8f2e0;
-const CARD: u32 = 0xfbf8ee;
-const HOVER: u32 = 0xeadfbd;
-const TEXT: u32 = 0x2b2b2b;
-
-fn c(h: u32) -> Color {
-    Color::from_hex(h)
+fn png(name: &str, d: &[u8]) -> image::PngImage {
+    image::PngImage::from_data(d).unwrap_or_else(|e| panic!("tex/{name}.png: {e}"))
 }
 
-fn tool(label: &str, x: i32, y: i32, w: i32, h: i32, primary: bool) -> button::Button {
-    let mut b = button::Button::new(x, y, w, h, None);
-    b.set_label(label);
+// Image button from tex/<name>_off.png + tex/<name>_on.png (on = hovered); the PNG sets the size.
+fn btn(off: image::PngImage, on: image::PngImage, x: i32, y: i32) -> button::Button {
+    let mut b = button::Button::new(x, y, off.w(), off.h(), None);
     b.set_frame(FrameType::NoBox);
-    b.set_color(c(if primary { GREEN } else { CARD }));
-    b.draw(move |b| {
-        draw::set_draw_color(b.color());
-        draw::draw_rounded_rectf(b.x(), b.y(), b.w(), b.h(), 10);
-        draw::set_draw_color(if primary { c(0xffffff) } else { c(TEXT) });
-        draw::set_font(Font::Helvetica, 13);
-        draw::draw_text2(&b.label(), b.x(), b.y(), b.w(), b.h(), Align::Center);
-    });
-    if !primary {
-        b.handle(|b, ev| match ev {
-            Event::Enter | Event::Leave => {
-                b.set_color(c(if ev == Event::Enter { HOVER } else { CARD }));
-                b.redraw();
-                true
-            }
-            _ => false,
-        });
-    }
-    b
-}
-
-// Title-bar window button: 0 = minimize, 1 = close.
-fn ctrl(kind: u8, x: i32) -> button::Button {
-    let mut b = button::Button::new(x, 6, 40, 32, None);
-    b.set_frame(FrameType::NoBox);
-    b.set_color(c(GREEN));
-    b.draw(move |b| {
-        draw::set_draw_color(b.color());
-        draw::draw_rectf(b.x(), b.y(), b.w(), b.h());
-        draw::set_draw_color(c(0xffffff));
-        draw::set_font(Font::HelveticaBold, 14);
-        draw::draw_text2(
-            if kind == 0 { "_" } else { "X" },
-            b.x(),
-            b.y(),
-            b.w(),
-            b.h(),
-            Align::Center,
-        );
-    });
+    b.set_image(Some(off.clone()));
     b.handle(move |b, ev| match ev {
         Event::Enter | Event::Leave => {
-            b.set_color(c(if ev == Event::Enter {
-                if kind == 1 { 0xc0392b } else { 0x2f6b49 }
+            b.set_image(Some(if ev == Event::Enter {
+                on.clone()
             } else {
-                GREEN
+                off.clone()
             }));
             b.redraw();
             true
@@ -75,24 +29,28 @@ fn ctrl(kind: u8, x: i32) -> button::Button {
     b
 }
 
-fn lbl(text: &str, x: i32, y: i32, w: i32, h: i32, size: i32, bold: bool, col: u32) -> Frame {
+macro_rules! btn {
+    ($n:literal, $x:expr, $y:expr) => {
+        btn(
+            png(
+                concat!($n, "_off"),
+                include_bytes!(concat!("../tex/", $n, "_off.png")),
+            ),
+            png(
+                concat!($n, "_on"),
+                include_bytes!(concat!("../tex/", $n, "_on.png")),
+            ),
+            $x,
+            $y,
+        )
+    };
+}
+
+fn lbl(text: &str, x: i32, y: i32, w: i32, h: i32, size: i32) -> Frame {
     let mut f = Frame::new(x, y, w, h, None);
     f.set_label(text);
     f.set_label_size(size);
-    f.set_label_font(if bold {
-        Font::HelveticaBold
-    } else {
-        Font::Helvetica
-    });
-    f.set_label_color(c(col));
     f.set_align(Align::Left | Align::Inside);
-    f
-}
-
-fn card(x: i32, y: i32, w: i32, h: i32, col: u32) -> Frame {
-    let mut f = Frame::new(x, y, w, h, None);
-    f.set_frame(FrameType::RFlatBox);
-    f.set_color(c(col));
     f
 }
 
@@ -100,37 +58,120 @@ fn spin(x: i32, y: i32, val: f64) -> Spinner {
     let mut s = Spinner::new(x, y, 52, 24, None);
     s.set_range(0.0, 999.0);
     s.set_value(val);
-    s.set_color(c(0xfffdf6));
     s
-}
-
-fn editor(
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    font: Font,
-    size: i32,
-) -> (text::TextEditor, text::TextBuffer) {
-    let buf = text::TextBuffer::default();
-    let mut ed = text::TextEditor::new(x, y, w, h, None);
-    ed.set_buffer(buf.clone());
-    ed.set_frame(FrameType::FlatBox);
-    ed.set_color(c(CARD));
-    ed.set_text_color(c(TEXT));
-    ed.set_text_font(font);
-    ed.set_text_size(size);
-    ed.set_cursor_color(c(GREEN));
-    ed.set_selection_color(c(0xcfe3d2));
-    (ed, buf)
 }
 
 const COLS: usize = 20; // max characters per line
 const ROWS: i32 = 8; // lines per page
+const FONT: Font = Font::Courier; // monospace
+const SIZE: i32 = 30;
 
-// Left page is a single 8-line page: no scrolling, so shrink the scrollbar away.
-fn no_scroll(ed: &mut text::TextEditor) {
-    ed.set_scrollbar_size(1);
+// Editor box is exactly COLS x ROWS character cells (fltk text margins: 3px sides, 1px top/bottom)
+// plus a vertical scrollbar of `bar` px (1 = effectively none).
+fn editor(x: i32, y: i32, bar: i32, show: Rc<Cell<bool>>) -> (text::TextEditor, text::TextBuffer) {
+    draw::set_font(FONT, SIZE);
+    let w = COLS as i32 * draw::width("M").round() as i32 + 6 + bar;
+    let h = ROWS * draw::height() + 2;
+    let buf = text::TextBuffer::default();
+    let mut ed = text::TextEditor::new(x, y, w, h, None);
+    ed.set_buffer(buf.clone());
+    ed.set_frame(FrameType::FlatBox);
+    ed.set_text_font(FONT);
+    ed.set_text_size(SIZE);
+    ed.set_scrollbar_size(bar);
+    // Tab: not handled by the editor, so fltk moves focus to the next widget instead of inserting.
+    ed.add_key_binding(Key::Tab, Shortcut::None, |_, _| 0);
+    // Invisible characters: fltk can't show them, so paint · / ¶ over the visible range after the base draw.
+    ed.super_draw_first(true);
+    ed.draw(move |e| {
+        let Some(b) = e.buffer().filter(|_| show.get()) else {
+            return;
+        };
+        let (from, to) = (
+            e.xy_to_position(e.x(), e.y(), text::PositionType::Cursor),
+            e.xy_to_position(e.x() + e.w(), e.y() + e.h(), text::PositionType::Cursor),
+        );
+        draw::push_clip(e.x(), e.y(), e.w(), e.h());
+        draw::set_font(FONT, SIZE);
+        draw::set_draw_color(Color::from_rgb(160, 160, 160));
+        let (cw, lh) = (draw::width("M").round() as i32, draw::height());
+        for (i, ch) in b.text().char_indices() {
+            let i = i as i32;
+            let g = match ch {
+                _ if i < from || i > to => continue,
+                ' ' => "·",
+                '\n' => "¶",
+                _ => continue,
+            };
+            let (px, py) = e.position_to_xy(i);
+            draw::draw_text2(g, px, py, cw, lh, Align::Center);
+        }
+        draw::pop_clip();
+    });
+    (ed, buf)
+}
+
+#[derive(Clone, Copy)]
+enum Al {
+    Left,
+    Center,
+    Right,
+    Justify,
+}
+
+// Plain text has no alignment attribute, so alignment is real padding: a line's leading/trailing
+// spaces are layout, never content, and are recomputed here. Only Justify touches inner spacing.
+fn align_line(l: &str, a: Al) -> String {
+    let t = l.trim_matches(' ');
+    let room = COLS.saturating_sub(t.chars().count());
+    match a {
+        Al::Left => t.to_string(),
+        Al::Center => format!("{}{t}", " ".repeat(room / 2)),
+        Al::Right => format!("{}{t}", " ".repeat(room)),
+        Al::Justify => {
+            let w: Vec<&str> = t.split(' ').filter(|s| !s.is_empty()).collect();
+            if w.len() < 2 {
+                return t.to_string();
+            }
+            let gaps = w.len() - 1;
+            let sp = COLS.saturating_sub(w.iter().map(|s| s.chars().count()).sum());
+            let mut out = String::new();
+            for (i, s) in w.iter().enumerate() {
+                out += s;
+                if i < gaps {
+                    out += &" ".repeat(sp / gaps + (i < sp % gaps) as usize);
+                }
+            }
+            out
+        }
+    }
+}
+
+// Align the selected lines (or the caret's line).
+fn align(e: &mut text::TextEditor, b: &mut text::TextBuffer, a: Al) {
+    let p = e.insert_position();
+    let (s, z) = b
+        .selection_position()
+        .filter(|(s, z)| s != z)
+        .unwrap_or((p, p));
+    let (s, z) = (s.min(z), s.max(z));
+    let z = if z > s && b.line_start(z) == z {
+        z - 1
+    } else {
+        z
+    }; // selection ending at a line start
+    let (ls, le) = (b.line_start(s), b.line_end(z));
+    let new = b
+        .text_range(ls, le)
+        .unwrap_or_default()
+        .split('\n')
+        .map(|l| align_line(l, a))
+        .collect::<Vec<_>>()
+        .join("\n");
+    b.replace(ls, le, &new);
+    b.unselect();
+    e.set_insert_position(ls + new.len() as i32);
+    e.show_insert_position();
 }
 
 // Insert text at the caret, enforcing COLS per line and (optionally) a max line count.
@@ -394,21 +435,13 @@ fn main() {
         .with_size(960, 728)
         .with_label("Notatnik");
     win.set_border(false);
-    win.set_color(c(BODY));
 
-    // backdrop: title bar, body, status bar
-    let mut top = Frame::new(0, 0, 960, 66, None);
-    top.set_frame(FrameType::FlatBox);
-    top.set_color(c(GREEN));
-    lbl("Notatnik", 18, 14, 200, 30, 18, true, 0xf3e2a9);
-    let mut body = Frame::new(0, 66, 960, 592, None);
-    body.set_frame(FrameType::FlatBox);
-    body.set_color(c(BODY));
-    let mut bottom = Frame::new(0, 658, 960, 70, None);
-    bottom.set_frame(FrameType::FlatBox);
-    bottom.set_color(c(GREEN));
+    // backdrop: title bar, toolbar/page panels, captions and editor frames are baked into one texture
+    let mut backdrop = Frame::new(0, 0, 960, 728, None);
+    backdrop.set_image(Some(png("bg", include_bytes!("../tex/bg.png"))));
 
     // drag the borderless window by its title bar
+    let mut top = Frame::new(0, 0, 960, 66, None);
     let off = Rc::new(Cell::new((0, 0)));
     top.handle({
         let (mut w, off) = (win.clone(), off.clone());
@@ -425,8 +458,8 @@ fn main() {
             _ => false,
         }
     });
-    let mut min = ctrl(0, 870);
-    let mut close = ctrl(1, 914);
+    let mut min = btn!("min", 886, 19);
+    let mut close = btn!("close", 918, 19);
     min.set_callback({
         let mut w = win.clone();
         move |_| w.iconize()
@@ -434,52 +467,48 @@ fn main() {
     close.set_callback(|_| app::quit());
 
     // toolbar
-    card(10, 78, 940, 80, PANEL);
-    let mut new = tool("Nowy", 19, 82, 88, 72, true);
-    let mut open = tool("Otwórz", 120, 82, 60, 72, false);
-    let mut save = tool("Zapisz", 184, 82, 60, 72, false);
-    let mut get = tool("Odczytaj", 248, 82, 70, 72, false);
-    let mut put_sign = tool("Wyślij", 322, 82, 62, 72, false);
-    lbl("Numer tekstu:", 655, 87, 85, 24, 13, false, TEXT);
-    lbl("Ilość stron:", 655, 118, 85, 24, 13, false, TEXT);
-    let num = spin(740, 87, 1.0);
-    let pgs = spin(740, 118, 0.0);
-    tool("Ustaw.", 812, 82, 46, 72, false);
-    tool("Opcje", 862, 82, 46, 72, false);
-    let mut info = tool("Info", 912, 82, 38, 72, false);
+    let mut new = btn!("nowy", 19, 82);
+    let mut open = btn!("otworz", 87, 82);
+    let mut save = btn!("zapisz", 155, 82);
+    let mut get = btn!("odczytaj", 223, 82);
+    let mut put_sign = btn!("wyslij", 291, 82);
+    let num = spin(725, 7, 1.0);
+    let pgs = spin(725, 35, 0.0);
+    btn!("ustaw", 746, 82);
+    btn!("opcje", 814, 82);
+    let mut info = btn!("info", 882, 82);
+    let (mut left, mut center, mut right, mut just) = (
+        btn!("lewo", 363, 82),
+        btn!("srodek", 431, 82),
+        btn!("prawo", 499, 82),
+        btn!("justuj", 567, 82),
+    );
+    let mut marks = btn!("znaki", 635, 82);
     info.set_callback(|_| message_default("Notatnik – prosty edytor tekstu"));
 
+    let show = Rc::new(Cell::new(false));
+
     // left panel: title page
-    card(20, 173, 440, 417, PANEL);
-    lbl("Strona tytułowa", 70, 183, 220, 34, 17, true, TEXT);
-    let kw1 = lbl("K: 1   W: 1", 330, 183, 120, 34, 14, false, TEXT);
-    card(33, 224, 418, 356, CARD);
-    let (mut title_ed, title_buf) = editor(36, 227, 412, 350, Font::Courier, 30);
-    no_scroll(&mut title_ed);
+    let kw1 = lbl("K: 1   W: 1", 330, 183, 120, 34, 14);
+    let (mut title_ed, title_buf) = editor(36, 227, 1, show.clone());
     rules(&mut title_ed, &title_buf, Some(ROWS), kw1, None);
 
     // right panel: page
-    card(472, 173, 468, 417, PANEL);
-    let page = lbl("Strona - 001", 522, 183, 200, 34, 17, true, TEXT);
-    let kw2 = lbl("K: 1   W: 1", 740, 183, 120, 34, 14, false, TEXT);
-    let mut search = tool("Szukaj", 856, 183, 70, 34, false);
-    search.set_color(c(PANEL));
-    card(483, 224, 448, 356, CARD);
-    let (mut ed, buf) = editor(486, 227, 442, 350, Font::Courier, 30);
-    ed.set_scrollbar_size(12);
+    let page = lbl("Strona - 001", 522, 183, 200, 34, 17);
+    let kw2 = lbl("K: 1   W: 1", 740, 183, 120, 34, 14);
+    let mut search = btn!("szukaj", 898, 186);
+    let (mut ed, buf) = editor(486, 227, 12, show.clone());
     rules(&mut ed, &buf, None, kw2, Some(page));
 
     // status bar
-    let com = lbl("COM-", 70, 676, 80, 24, 16, false, 0xf3e2a9);
-    let msg = lbl("", 170, 676, 540, 24, 13, false, 0xf3e2a9);
+    let com = lbl("COM-", 70, 676, 80, 24, 16);
+    let msg = lbl("", 170, 676, 540, 24, 13);
     let mut port = menu::Choice::new(730, 674, 210, 26, None);
     port.add_choice("Port szeregowy niewybrany");
     for name in sign::ports() {
         port.add_choice(&name);
     }
     port.set_value(0);
-    port.set_color(c(CARD));
-    port.set_text_color(c(TEXT));
     port.set_text_size(13);
     port.set_callback({
         let mut com = com.clone();
@@ -488,6 +517,37 @@ fn main() {
 
     win.end();
     win.show();
+
+    // alignment acts on the focused editor (body if none); clicks don't steal focus (visible_focus is off)
+    let go: Rc<dyn Fn(Al)> = Rc::new({
+        let (te, tb, e, b) = (title_ed.clone(), title_buf.clone(), ed.clone(), buf.clone());
+        move |a| {
+            let title = app::focus().is_some_and(|f| f.is_same(&te));
+            let (mut e, mut b) = if title {
+                (te.clone(), tb.clone())
+            } else {
+                (e.clone(), b.clone())
+            };
+            align(&mut e, &mut b, a);
+        }
+    });
+    for (btn, a) in [
+        (&mut left, Al::Left),
+        (&mut center, Al::Center),
+        (&mut right, Al::Right),
+        (&mut just, Al::Justify),
+    ] {
+        let go = go.clone();
+        btn.set_callback(move |_| go(a));
+    }
+    marks.set_callback({
+        let (show, mut te, mut e) = (show.clone(), title_ed.clone(), ed.clone());
+        move |_| {
+            show.set(!show.get());
+            te.redraw();
+            e.redraw();
+        }
+    });
 
     // actions (plain text, right-hand page)
     let path: Rc<RefCell<Option<PathBuf>>> = Rc::default();
@@ -648,6 +708,20 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alignment() {
+        let sp = |n| " ".repeat(n);
+        assert_eq!(align_line("abcd", Al::Center), format!("{}abcd", sp(8)));
+        assert_eq!(align_line("  abcd  ", Al::Right), format!("{}abcd", sp(16)));
+        assert_eq!(align_line("  abcd  ", Al::Left), "abcd");
+        assert_eq!(align_line("ab cd", Al::Justify), format!("ab{}cd", sp(16)));
+        assert_eq!(
+            align_line(" a b c ", Al::Justify),
+            format!("a{}b{}c", sp(9), sp(8))
+        );
+        assert_eq!(align_line("word", Al::Justify), "word");
+    }
 
     #[test]
     fn file_roundtrip_keeps_page_shape() {

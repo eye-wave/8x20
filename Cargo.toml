@@ -1,0 +1,21 @@
+
+cargo-features = ["profile-rustflags"]
+
+[package]
+name = "tugal"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serialport = "4.10.1"
+
+[profile.release]
+opt-level = "z"
+codegen-units = 1
+lto = "fat"
+panic = "abort"
+strip = "debuginfo"
+debug = false
+overflow-checks = false
+trim-paths = "all"
+rustflags = ["-Cdebuginfo=0", "-Zthreads=8"]

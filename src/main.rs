@@ -1,270 +1,669 @@
-//! CRT-20+ text sign over COM, ported from tablica.exe (Delphi/CPort).
-//! Frame: FF FF | cmd | len(u16 BE) | payload | crc(2)   len = 5 + payload.len()
-//! Usage: tablica scan
-//!        tablica COM3 read N [PAGES [FILE.txt]]   (no FILE = raw bytes to stdout)
-//!        tablica COM3 write N FILE.txt
-//! Text is never converted: file bytes (Windows-1250) go to the sign and back unchanged.
-//! DEBUG=1 prints tx/rx frames; DTR=1 / RTS=1 raise those lines (the exe leaves both low).
-use serialport::{ClearBuffer, SerialPort};
-use std::{
-    io::{self, ErrorKind, Write},
-    time::Duration,
-};
+#![cfg_attr(windows, windows_subsystem = "windows")]
+use encoding_rs::WINDOWS_1250;
+use fltk::{dialog::*, enums::*, frame::Frame, misc::Spinner, prelude::*, *};
+use std::{cell::Cell, cell::RefCell, fs, path::PathBuf, rc::Rc, sync::mpsc};
 
-// CRC-16 poly 0x8005, MSB-first table (identical to the tables in the exe).
-const T: [u16; 256] = {
-    let mut t = [0u16; 256];
-    let mut i = 0;
-    while i < 256 {
-        let mut c = (i as u16) << 8;
-        let mut k = 0;
-        while k < 8 {
-            c = if c & 0x8000 != 0 {
-                (c << 1) ^ 0x8005
-            } else {
-                c << 1
-            };
-            k += 1;
-        }
-        t[i] = c;
-        i += 1;
-    }
-    t
-};
+mod sign;
 
-// Exact port of the exe's routine at 0x498fcc: odd 0xAA seed, then two zero bytes appended.
-fn crc(data: &[u8]) -> [u8; 2] {
-    let (mut h, mut l) = (0xAAu8 ^ (T[0xAA] >> 8) as u8, 0xAAu8 ^ T[0xAA] as u8);
-    for &b in data.iter().chain(&[0u8, 0]) {
-        let t = T[h as usize];
-        (h, l) = (l ^ (t >> 8) as u8, b ^ t as u8);
-    }
-    [h, l]
+const GREEN: u32 = 0x1f4d34;
+const BODY: u32 = 0xf3ecd6;
+const PANEL: u32 = 0xf8f2e0;
+const CARD: u32 = 0xfbf8ee;
+const HOVER: u32 = 0xeadfbd;
+const TEXT: u32 = 0x2b2b2b;
+
+fn c(h: u32) -> Color {
+    Color::from_hex(h)
 }
 
-fn frame(cmd: u8, payload: &[u8]) -> Vec<u8> {
-    let mut body = vec![cmd];
-    body.extend((5 + payload.len() as u16).to_be_bytes());
-    body.extend_from_slice(payload);
-    let c = crc(&body);
-    let mut out = vec![0xFF, 0xFF];
-    out.extend(body);
-    out.extend(c);
-    out
-}
-
-fn debug() -> bool {
-    std::env::var_os("DEBUG").is_some()
-}
-
-// ponytail: read until idle timeout; the exe counts bytes but its length rule looks off by one. Replies' CRC unchecked.
-fn rx(p: &mut dyn SerialPort) -> io::Result<Vec<u8>> {
-    let (mut v, mut b) = (vec![], [0u8; 256]);
-    p.set_timeout(Duration::from_secs(3))?; // first byte may be slow
-    loop {
-        match p.read(&mut b) {
-            Ok(0) => break,
-            Ok(n) => {
-                v.extend_from_slice(&b[..n]);
-                p.set_timeout(Duration::from_millis(300))?; // then idle gap ends the reply
+fn tool(label: &str, x: i32, y: i32, w: i32, h: i32, primary: bool) -> button::Button {
+    let mut b = button::Button::new(x, y, w, h, None);
+    b.set_label(label);
+    b.set_frame(FrameType::NoBox);
+    b.set_color(c(if primary { GREEN } else { CARD }));
+    b.draw(move |b| {
+        draw::set_draw_color(b.color());
+        draw::draw_rounded_rectf(b.x(), b.y(), b.w(), b.h(), 10);
+        draw::set_draw_color(if primary { c(0xffffff) } else { c(TEXT) });
+        draw::set_font(Font::Helvetica, 13);
+        draw::draw_text2(&b.label(), b.x(), b.y(), b.w(), b.h(), Align::Center);
+    });
+    if !primary {
+        b.handle(|b, ev| match ev {
+            Event::Enter | Event::Leave => {
+                b.set_color(c(if ev == Event::Enter { HOVER } else { CARD }));
+                b.redraw();
+                true
             }
-            Err(e) if e.kind() == ErrorKind::TimedOut => break,
-            Err(e) => return Err(e),
+            _ => false,
+        });
+    }
+    b
+}
+
+// Title-bar window button: 0 = minimize, 1 = close.
+fn ctrl(kind: u8, x: i32) -> button::Button {
+    let mut b = button::Button::new(x, 6, 40, 32, None);
+    b.set_frame(FrameType::NoBox);
+    b.set_color(c(GREEN));
+    b.draw(move |b| {
+        draw::set_draw_color(b.color());
+        draw::draw_rectf(b.x(), b.y(), b.w(), b.h());
+        draw::set_draw_color(c(0xffffff));
+        draw::set_font(Font::HelveticaBold, 14);
+        draw::draw_text2(
+            if kind == 0 { "_" } else { "X" },
+            b.x(),
+            b.y(),
+            b.w(),
+            b.h(),
+            Align::Center,
+        );
+    });
+    b.handle(move |b, ev| match ev {
+        Event::Enter | Event::Leave => {
+            b.set_color(c(if ev == Event::Enter {
+                if kind == 1 { 0xc0392b } else { 0x2f6b49 }
+            } else {
+                GREEN
+            }));
+            b.redraw();
+            true
         }
-    }
-    if debug() {
-        eprintln!("rx {v:02x?}");
-    }
-    let skip = v.iter().position(|&x| x != 0xFF).unwrap_or(v.len()); // exe drops leading FFs
-    Ok(v.split_off(skip))
+        _ => false,
+    });
+    b
 }
 
-fn send(p: &mut dyn SerialPort, f: &[u8]) -> io::Result<Vec<u8>> {
-    p.clear(ClearBuffer::All)?; // exe purges RX+TX before every send
-    if debug() {
-        eprintln!("tx {f:02x?}");
-    }
-    p.write_all(f)?;
-    rx(p)
+fn lbl(text: &str, x: i32, y: i32, w: i32, h: i32, size: i32, bold: bool, col: u32) -> Frame {
+    let mut f = Frame::new(x, y, w, h, None);
+    f.set_label(text);
+    f.set_label_size(size);
+    f.set_label_font(if bold {
+        Font::HelveticaBold
+    } else {
+        Font::Helvetica
+    });
+    f.set_label_color(c(col));
+    f.set_align(Align::Left | Align::Inside);
+    f
 }
 
-// One page = 8 rows x 20 bytes. Reply is cmd 5: [05 len len 14 a0] + 160 bytes at r[5..165].
-fn page(p: &mut dyn SerialPort, f: &[u8]) -> io::Result<Vec<Vec<u8>>> {
-    let r = send(p, f)?;
-    if r.len() < 165 || r[0] != 5 {
-        return Err(io::Error::new(
-            ErrorKind::InvalidData,
-            format!("bad reply: {r:02x?}"),
-        ));
+fn card(x: i32, y: i32, w: i32, h: i32, col: u32) -> Frame {
+    let mut f = Frame::new(x, y, w, h, None);
+    f.set_frame(FrameType::RFlatBox);
+    f.set_color(c(col));
+    f
+}
+
+fn spin(x: i32, y: i32, val: f64) -> Spinner {
+    let mut s = Spinner::new(x, y, 52, 24, None);
+    s.set_range(0.0, 999.0);
+    s.set_value(val);
+    s.set_color(c(0xfffdf6));
+    s
+}
+
+fn editor(
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    font: Font,
+    size: i32,
+) -> (text::TextEditor, text::TextBuffer) {
+    let buf = text::TextBuffer::default();
+    let mut ed = text::TextEditor::new(x, y, w, h, None);
+    ed.set_buffer(buf.clone());
+    ed.set_frame(FrameType::FlatBox);
+    ed.set_color(c(CARD));
+    ed.set_text_color(c(TEXT));
+    ed.set_text_font(font);
+    ed.set_text_size(size);
+    ed.set_cursor_color(c(GREEN));
+    ed.set_selection_color(c(0xcfe3d2));
+    (ed, buf)
+}
+
+const COLS: usize = 20; // max characters per line
+const ROWS: i32 = 8; // lines per page
+
+// Left page is a single 8-line page: no scrolling, so shrink the scrollbar away.
+fn no_scroll(ed: &mut text::TextEditor) {
+    ed.set_scrollbar_size(1);
+}
+
+// Insert text at the caret, enforcing COLS per line and (optionally) a max line count.
+// Typing is blocked at the limit; pasting hard-wraps at the limit instead.
+fn put(
+    e: &mut text::TextEditor,
+    b: &mut text::TextBuffer,
+    s: &str,
+    max_lines: Option<i32>,
+    wrap: bool,
+) {
+    if let Some((a, z)) = b.selection_position() {
+        if a != z {
+            b.remove(a, z);
+            e.set_insert_position(a);
+        }
+        b.unselect();
     }
-    Ok((0..8)
-        .map(|i| r[5 + 20 * i..25 + 20 * i].to_vec())
-        .collect())
+    let mut pos = e.insert_position();
+    for ch in s.chars() {
+        let ch = if ch == '\t' { ' ' } else { ch };
+        if ch == '\r' || (ch != '\n' && ch.is_control()) {
+            continue;
+        }
+        let (ls, le) = (b.line_start(pos), b.line_end(pos));
+        let len = b.text_range(ls, le).unwrap_or_default().chars().count();
+        let room = max_lines.is_none_or(|m| b.count_lines(0, b.length()) + 1 < m);
+        let out = if ch == '\n' {
+            if !room {
+                continue;
+            }
+            "\n".to_string()
+        } else if len < COLS {
+            ch.to_string()
+        } else if wrap && pos == le && room && ch != ' ' {
+            format!("\n{ch}")
+        } else {
+            continue;
+        };
+        b.insert(pos, &out);
+        pos += out.len() as i32;
+    }
+    e.set_insert_position(pos);
+    e.show_insert_position();
 }
 
 const DECO: &[u8] = b"<------------------>";
 
-// txt format of the exe: page 0 (title page) first with no header, every later page
-// preceded by DECO / "<- Strona nr: 001 ->" / DECO; 8 rows of 20 bytes per page.
-// Slot N = page 0 via cmd 1 + N, pages 1..=pages via cmd 3 + page number (exe's read loop).
-fn read_slot(p: &mut dyn SerialPort, n: u16, pages: u8) -> io::Result<Vec<u8>> {
+// File format: every page (title page = 000 first) is DECO / "<- Strona nr: NNN ->" / DECO
+// followed by exactly ROWS rows of at most COLS bytes (Windows-1250, CRLF).
+fn file_bytes(pages: &sign::Pages) -> Vec<u8> {
     let mut out = vec![];
-    for k in 0..=pages {
-        let f = if k == 0 {
-            frame(1, &n.to_be_bytes())
-        } else {
-            frame(3, &[k])
-        };
-        if k > 0 {
-            out.extend_from_slice(DECO);
-            out.extend_from_slice(format!("\r\n<- Strona nr: {k:03} ->\r\n").as_bytes());
-            out.extend_from_slice(DECO);
-            out.extend_from_slice(b"\r\n");
-        }
-        for row in page(p, &f)? {
-            out.extend(row);
+    for (k, rows) in pages.iter().enumerate() {
+        out.extend_from_slice(DECO);
+        out.extend_from_slice(format!("\r\n<- Strona nr: {k:03} ->\r\n").as_bytes());
+        out.extend_from_slice(DECO);
+        out.extend_from_slice(b"\r\n");
+        for i in 0..ROWS as usize {
+            out.extend_from_slice(rows.get(i).map_or(&[][..], |r| &r[..]));
             out.extend_from_slice(b"\r\n");
         }
     }
-    Ok(out)
+    out
 }
 
-// Parse that txt format back into pages. Decorator numbers pick the page, rows before the first one are page 0.
-// Rows over 20 bytes or pages over 8 rows are errors, not silent truncation.
-fn parse(txt: &[u8]) -> Result<Vec<Vec<Vec<u8>>>, String> {
+// Inverse of file_bytes. Rows before the first header belong to page 0; a bad row or page is an error, never truncated.
+fn parse(txt: &[u8]) -> Result<sign::Pages, String> {
     let mut l: Vec<&[u8]> = txt
         .split(|&b| b == b'\n')
         .map(|x| x.strip_suffix(b"\r").unwrap_or(x))
         .collect();
     if l.last().is_some_and(|x| x.is_empty()) {
-        l.pop(); // newline at end of file
+        l.pop();
     }
     let (mut pages, mut cur, mut i) = (vec![vec![]], 0usize, 0);
     while i < l.len() {
-        let hdr = l[i] == DECO
+        if l[i] == DECO
             && l.get(i + 2) == Some(&DECO)
             && l.get(i + 1)
-                .is_some_and(|s| s.starts_with(b"<- Strona nr: "));
-        if hdr {
+                .is_some_and(|s| s.starts_with(b"<- Strona nr: "))
+        {
             cur = l[i + 1]
                 .get(14..17)
                 .and_then(|d| std::str::from_utf8(d).ok())
                 .and_then(|d| d.parse().ok())
-                .ok_or(format!("bad page header, line {}", i + 2))?;
+                .ok_or(format!("Zły nagłówek strony, linia {}", i + 2))?;
             if cur > 127 {
-                return Err(format!("page {cur} too high (max 127)"));
+                return Err(format!("Strona {cur} za wysoka (max 127)"));
             }
             pages.resize(pages.len().max(cur + 1), vec![]);
             i += 3;
             continue;
         }
-        if l[i].len() > 20 {
-            return Err(format!("line {} is longer than 20 characters", i + 1));
+        if l[i].len() > COLS {
+            return Err(format!("Linia {} ma więcej niż {COLS} znaków", i + 1));
         }
         pages[cur].push(l[i].to_vec());
-        if pages[cur].len() > 8 {
-            return Err(format!("page {cur} has more than 8 rows (line {})", i + 1));
+        if pages[cur].len() > ROWS as usize {
+            return Err(format!(
+                "Strona {cur} ma więcej niż {ROWS} linii (linia {})",
+                i + 1
+            ));
         }
         i += 1;
     }
     Ok(pages)
 }
 
-fn ack(r: Vec<u8>) -> io::Result<()> {
-    if r.first() == Some(&6) {
-        Ok(())
+// Pages 1.. as one editor body; each page padded to ROWS rows so editor lines stay aligned with pages.
+fn body_text(pages: &[Vec<Vec<u8>>]) -> String {
+    let padded: Vec<Vec<u8>> = pages
+        .iter()
+        .flat_map(|p| (0..ROWS as usize).map(move |i| p.get(i).cloned().unwrap_or_default()))
+        .collect();
+    decode(&padded)
+}
+
+// True if the text just inserted at pos..pos+ins left any line over COLS or too many lines.
+fn bad(b: &text::TextBuffer, pos: i32, ins: i32, max_lines: Option<i32>) -> bool {
+    let (mut p, end) = (b.line_start(pos), b.line_end((pos + ins).min(b.length())));
+    loop {
+        let le = b.line_end(p);
+        if b.text_range(p, le).unwrap_or_default().chars().count() > COLS {
+            return true;
+        }
+        if le >= end || le >= b.length() {
+            break;
+        }
+        p = le + 1;
+    }
+    max_lines.is_some_and(|m| b.count_lines(0, b.length()) + 1 > m)
+}
+
+// Enforces the line rules on the buffer itself (so it works however fltk orders its key handling):
+// any edit that breaks them is taken back on the next loop tick; pastes are re-inserted hard-wrapped.
+// Also keeps K (column) / W (row) and the page label fresh.
+fn rules(
+    ed: &mut text::TextEditor,
+    buf: &text::TextBuffer,
+    max_lines: Option<i32>,
+    mut kw: Frame,
+    mut page: Option<Frame>,
+) {
+    let mut watch = buf.clone();
+    watch.add_modify_callback({
+        let (b, e) = (buf.clone(), ed.clone());
+        move |pos, ins, _del, _r, _t| {
+            if ins > 0 && bad(&b, pos, ins, max_lines) {
+                let (mut b, mut e) = (b.clone(), e.clone());
+                app::add_timeout3(0.0, move |_| {
+                    let txt = b
+                        .text_range(pos, (pos + ins).min(b.length()))
+                        .unwrap_or_default();
+                    b.remove(pos, (pos + ins).min(b.length()));
+                    e.set_insert_position(pos);
+                    put(&mut e, &mut b, &txt, max_lines, ins > 1);
+                });
+            }
+        }
+    });
+    let b = buf.clone();
+    let mut upd = move |e: &text::TextEditor| {
+        let p = e.insert_position();
+        let row = b.count_lines(0, p) + 1;
+        let col = b
+            .text_range(b.line_start(p), p)
+            .unwrap_or_default()
+            .chars()
+            .count()
+            + 1;
+        kw.set_label(&format!("K: {col}   W: {row}"));
+        if let Some(pg) = page.as_mut() {
+            pg.set_label(&format!("Strona - {:03}", (row - 1) / ROWS + 1));
+        }
+    };
+    ed.handle(move |e, ev| {
+        if matches!(ev, Event::KeyUp | Event::Released | Event::Focus) {
+            upd(e);
+        }
+        false
+    });
+}
+
+fn port_of(c: &menu::Choice) -> Option<String> {
+    if c.value() > 0 {
+        c.text(c.value())
     } else {
-        Err(io::Error::new(
-            ErrorKind::InvalidData,
-            format!("no ack: {r:02x?}"),
-        ))
+        None
     }
 }
 
-// Exe's write sequence: every page as cmd 4 [page index, 8x20 bytes padded to 256] waiting for ack (cmd 6),
-// then cmd 2 [N] commits the slot. pages[0] is the title page.
-fn write_slot(p: &mut dyn SerialPort, n: u16, pages: &[Vec<Vec<u8>>]) -> io::Result<()> {
-    for (k, rows) in pages.iter().enumerate() {
-        let mut pl = vec![b' '; 257];
-        pl[0] = k as u8;
-        for (i, row) in rows.iter().take(8).enumerate() {
-            pl[1 + 20 * i..1 + 20 * i + row.len()].copy_from_slice(row);
-        }
-        ack(send(p, &frame(4, &pl))?)?;
-    }
-    ack(send(p, &frame(2, &n.to_be_bytes()))?)
-}
-
-// 115200 8N1, no flow control = the form's stored defaults; DTR/RTS low like the exe.
-fn open(name: &str) -> serialport::Result<Box<dyn SerialPort>> {
-    let mut p = serialport::new(name, 115_200)
-        .timeout(Duration::from_millis(500))
-        .open()?;
-    let on = |k: &str| std::env::var(k).is_ok_and(|v| v == "1");
-    p.write_data_terminal_ready(on("DTR"))?;
-    p.write_request_to_send(on("RTS"))?;
-    std::thread::sleep(Duration::from_millis(500)); // let the adapter settle after open
-    Ok(p)
-}
-
-// Probe every port with a read of slot 1 (changes nothing on the sign); a valid page back = the sign.
-// ponytail: sequential, ~3s per silent port; ports held by another program are skipped (DEBUG=1 shows why).
-fn scan() -> io::Result<()> {
-    let mut found = false;
-    for info in serialport::available_ports()? {
-        let hit = open(&info.port_name)
-            .map_err(|e| e.to_string())
-            .and_then(|mut p| {
-                page(&mut *p, &frame(1, &1u16.to_be_bytes())).map_err(|e| e.to_string())
-            });
-        match hit {
-            Ok(_) => {
-                println!("{}", info.port_name);
-                found = true;
+// Run a blocking job on a thread; deliver its result on the UI thread.
+fn bg<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'static, done: impl FnOnce(T) + 'static) {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(job());
+    });
+    let mut done = Some(done);
+    app::add_timeout3(0.1, move |h| match rx.try_recv() {
+        Ok(v) => {
+            if let Some(d) = done.take() {
+                d(v)
             }
-            Err(e) if debug() => eprintln!("{}: {e}", info.port_name),
-            Err(_) => {}
         }
-    }
-    if !found {
-        eprintln!("no device answered (close tablica.exe, check the cable)");
-        std::process::exit(1);
-    }
-    Ok(())
+        Err(mpsc::TryRecvError::Empty) => app::repeat_timeout3(0.1, h),
+        Err(_) => {}
+    });
 }
 
-fn main() -> io::Result<()> {
-    let a: Vec<String> = std::env::args().collect();
-    if a.get(1).map(String::as_str) == Some("scan") {
-        return scan();
+// Sign rows (Windows-1250, space padded) -> editor text; trailing blank rows dropped.
+fn decode(rows: &[Vec<u8>]) -> String {
+    let mut v: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            WINDOWS_1250
+                .decode(r)
+                .0
+                .trim_end_matches([' ', '\0'])
+                .to_string()
+        })
+        .collect();
+    while v.last().is_some_and(|l| l.is_empty()) {
+        v.pop();
     }
-    if a.len() < 4 {
-        eprintln!(
-            "usage: tablica scan | tablica COMx read N [PAGES [FILE]] | tablica COMx write N FILE"
+    v.join("\n")
+}
+
+// Editor text -> pages: title page first, then the body in chunks of ROWS lines.
+fn to_pages(title: &str, body: &str) -> Result<sign::Pages, String> {
+    let rows = |t: &str| -> Result<Vec<Vec<u8>>, String> {
+        t.lines()
+            .map(|l| {
+                let (b, _, bad) = WINDOWS_1250.encode(l);
+                if bad || b.len() > COLS {
+                    Err(format!(
+                        "Nieprawidłowa linia (znak spoza Windows-1250?): {l}"
+                    ))
+                } else {
+                    Ok(b.into_owned())
+                }
+            })
+            .collect()
+    };
+    let mut pages = vec![rows(title)?];
+    if pages[0].len() > ROWS as usize {
+        return Err(format!("Strona tytułowa ma więcej niż {ROWS} linii"));
+    }
+    pages.extend(rows(body)?.chunks(ROWS as usize).map(|c| c.to_vec()));
+    if pages.len() > 128 {
+        return Err("Za dużo stron (max 127)".into());
+    }
+    Ok(pages)
+}
+
+fn main() {
+    let app = app::App::default();
+    app::set_visible_focus(false);
+    app::set_font_size(14);
+
+    let mut win = window::Window::default()
+        .with_size(960, 728)
+        .with_label("Notatnik");
+    win.set_border(false);
+    win.set_color(c(BODY));
+
+    // backdrop: title bar, body, status bar
+    let mut top = Frame::new(0, 0, 960, 66, None);
+    top.set_frame(FrameType::FlatBox);
+    top.set_color(c(GREEN));
+    lbl("Notatnik", 18, 14, 200, 30, 18, true, 0xf3e2a9);
+    let mut body = Frame::new(0, 66, 960, 592, None);
+    body.set_frame(FrameType::FlatBox);
+    body.set_color(c(BODY));
+    let mut bottom = Frame::new(0, 658, 960, 70, None);
+    bottom.set_frame(FrameType::FlatBox);
+    bottom.set_color(c(GREEN));
+
+    // drag the borderless window by its title bar
+    let off = Rc::new(Cell::new((0, 0)));
+    top.handle({
+        let (mut w, off) = (win.clone(), off.clone());
+        move |_, ev| match ev {
+            Event::Push => {
+                off.set((app::event_x_root() - w.x(), app::event_y_root() - w.y()));
+                true
+            }
+            Event::Drag => {
+                let (ox, oy) = off.get();
+                w.set_pos(app::event_x_root() - ox, app::event_y_root() - oy);
+                true
+            }
+            _ => false,
+        }
+    });
+    let mut min = ctrl(0, 870);
+    let mut close = ctrl(1, 914);
+    min.set_callback({
+        let mut w = win.clone();
+        move |_| w.iconize()
+    });
+    close.set_callback(|_| app::quit());
+
+    // toolbar
+    card(10, 78, 940, 80, PANEL);
+    let mut new = tool("Nowy", 19, 82, 88, 72, true);
+    let mut open = tool("Otwórz", 120, 82, 60, 72, false);
+    let mut save = tool("Zapisz", 184, 82, 60, 72, false);
+    let mut get = tool("Odczytaj", 248, 82, 70, 72, false);
+    let mut put_sign = tool("Wyślij", 322, 82, 62, 72, false);
+    lbl("Numer tekstu:", 655, 87, 85, 24, 13, false, TEXT);
+    lbl("Ilość stron:", 655, 118, 85, 24, 13, false, TEXT);
+    let num = spin(740, 87, 1.0);
+    let pgs = spin(740, 118, 0.0);
+    tool("Ustaw.", 812, 82, 46, 72, false);
+    tool("Opcje", 862, 82, 46, 72, false);
+    let mut info = tool("Info", 912, 82, 38, 72, false);
+    info.set_callback(|_| message_default("Notatnik – prosty edytor tekstu"));
+
+    // left panel: title page
+    card(20, 173, 440, 417, PANEL);
+    lbl("Strona tytułowa", 70, 183, 220, 34, 17, true, TEXT);
+    let kw1 = lbl("K: 1   W: 1", 330, 183, 120, 34, 14, false, TEXT);
+    card(33, 224, 418, 356, CARD);
+    let (mut title_ed, title_buf) = editor(36, 227, 412, 350, Font::Courier, 30);
+    no_scroll(&mut title_ed);
+    rules(&mut title_ed, &title_buf, Some(ROWS), kw1, None);
+
+    // right panel: page
+    card(472, 173, 468, 417, PANEL);
+    let page = lbl("Strona - 001", 522, 183, 200, 34, 17, true, TEXT);
+    let kw2 = lbl("K: 1   W: 1", 740, 183, 120, 34, 14, false, TEXT);
+    let mut search = tool("Szukaj", 856, 183, 70, 34, false);
+    search.set_color(c(PANEL));
+    card(483, 224, 448, 356, CARD);
+    let (mut ed, buf) = editor(486, 227, 442, 350, Font::Courier, 30);
+    ed.set_scrollbar_size(12);
+    rules(&mut ed, &buf, None, kw2, Some(page));
+
+    // status bar
+    let com = lbl("COM-", 70, 676, 80, 24, 16, false, 0xf3e2a9);
+    let msg = lbl("", 170, 676, 540, 24, 13, false, 0xf3e2a9);
+    let mut port = menu::Choice::new(730, 674, 210, 26, None);
+    port.add_choice("Port szeregowy niewybrany");
+    for name in sign::ports() {
+        port.add_choice(&name);
+    }
+    port.set_value(0);
+    port.set_color(c(CARD));
+    port.set_text_color(c(TEXT));
+    port.set_text_size(13);
+    port.set_callback({
+        let mut com = com.clone();
+        move |p| com.set_label(&port_of(p).unwrap_or_else(|| "COM-".into()))
+    });
+
+    win.end();
+    win.show();
+
+    // actions (plain text, right-hand page)
+    let path: Rc<RefCell<Option<PathBuf>>> = Rc::default();
+    new.set_callback({
+        let (mut b, mut tb, path) = (buf.clone(), title_buf.clone(), path.clone());
+        move |_| {
+            b.set_text("");
+            tb.set_text("");
+            *path.borrow_mut() = None;
+        }
+    });
+    open.set_callback({
+        let (mut b, mut tb, path) = (buf.clone(), title_buf.clone(), path.clone());
+        move |_| {
+            let mut d = NativeFileChooser::new(NativeFileChooserType::BrowseFile);
+            d.show();
+            let f = d.filename();
+            if f.as_os_str().is_empty() {
+                return;
+            }
+            match fs::read(&f)
+                .map_err(|e| e.to_string())
+                .and_then(|t| parse(&t))
+            {
+                Ok(pages) => {
+                    tb.set_text(&decode(&pages[0]));
+                    b.set_text(&body_text(&pages[1..]));
+                    *path.borrow_mut() = Some(f);
+                }
+                Err(e) => alert_default(&format!("Nie można otworzyć: {e}")),
+            }
+        }
+    });
+    save.set_callback({
+        let (b, tb, path) = (buf.clone(), title_buf.clone(), path.clone());
+        move |_| {
+            let bytes = match to_pages(&tb.text(), &b.text()) {
+                Ok(p) => file_bytes(&p),
+                Err(e) => return alert_default(&format!("Nie można zapisać: {e}")),
+            };
+            if path.borrow().is_none() {
+                let mut d = NativeFileChooser::new(NativeFileChooserType::BrowseSaveFile);
+                d.set_option(NativeFileChooserOptions::SaveAsConfirm);
+                d.show();
+                let f = d.filename();
+                if f.as_os_str().is_empty() {
+                    return;
+                }
+                *path.borrow_mut() = Some(f);
+            }
+            let p = path.borrow().clone().unwrap();
+            if let Err(e) = fs::write(&p, bytes) {
+                alert_default(&format!("Nie można zapisać: {e}"));
+            }
+        }
+    });
+    search.set_callback({
+        let (mut ed, mut b) = (ed.clone(), buf.clone());
+        move |_| {
+            if let Some(q) = input_default("Szukaj:", "")
+                && let Some(p) = b.search_forward(ed.insert_position(), &q, false)
+            {
+                let e = p + q.len() as i32;
+                b.select(p, e);
+                ed.set_insert_position(e);
+                ed.show_insert_position();
+            }
+        }
+    });
+
+    // projector read / write (slow serial I/O runs on a worker thread)
+    let busy = Rc::new(Cell::new(false));
+    get.set_callback({
+        let (port, num, pgs, mut msg, buf, tbuf, busy) = (
+            port.clone(),
+            num.clone(),
+            pgs.clone(),
+            msg.clone(),
+            buf.clone(),
+            title_buf.clone(),
+            busy.clone(),
         );
-        std::process::exit(2);
-    }
-    let mut p = open(&a[1])?;
-    let n: u16 = a[3].parse().expect("text number");
-    match a[2].as_str() {
-        "read" => {
-            let t = read_slot(
-                &mut *p,
-                n,
-                a.get(4).map_or(0, |s| s.parse().expect("pages")),
-            )?;
-            match a.get(5) {
-                Some(f) => std::fs::write(f, &t)?,
-                None => io::stdout().write_all(&t)?,
+        move |_| {
+            if busy.get() {
+                return;
             }
+            let Some(name) = port_of(&port) else {
+                msg.set_label("Wybierz port szeregowy");
+                return;
+            };
+            let (n, k) = (num.value() as u16, pgs.value() as u8);
+            busy.set(true);
+            msg.set_label("Odczyt z tablicy...");
+            let (mut buf, mut tbuf, mut msg, busy) =
+                (buf.clone(), tbuf.clone(), msg.clone(), busy.clone());
+            bg(
+                move || sign::read(&name, n, k).map_err(|e| e.to_string()),
+                move |r| {
+                    busy.set(false);
+                    match r {
+                        Ok(pages) => {
+                            tbuf.set_text(&decode(&pages[0]));
+                            buf.set_text(&decode(&pages[1..].concat()));
+                            msg.set_label("Odczytano");
+                        }
+                        Err(e) => msg.set_label(&format!("Błąd odczytu: {e}")),
+                    }
+                },
+            );
         }
-        "write" => {
-            let txt = std::fs::read(a.get(4).expect("file"))?;
-            let pages = parse(&txt).map_err(|e| io::Error::new(ErrorKind::InvalidData, e))?;
-            write_slot(&mut *p, n, &pages)?;
-            println!("written {} pages", pages.len());
+    });
+    put_sign.set_callback({
+        let (port, num, pgs, mut msg, buf, tbuf, busy) = (
+            port.clone(),
+            num.clone(),
+            pgs.clone(),
+            msg.clone(),
+            buf.clone(),
+            title_buf.clone(),
+            busy.clone(),
+        );
+        move |_| {
+            if busy.get() {
+                return;
+            }
+            let Some(name) = port_of(&port) else {
+                msg.set_label("Wybierz port szeregowy");
+                return;
+            };
+            let pages = match to_pages(&tbuf.text(), &buf.text()) {
+                Ok(p) => p,
+                Err(e) => return msg.set_label(&e),
+            };
+            let n = num.value() as u16;
+            busy.set(true);
+            msg.set_label("Zapis do tablicy...");
+            let (mut pgs, mut msg, busy) = (pgs.clone(), msg.clone(), busy.clone());
+            let count = pages.len() - 1;
+            bg(
+                move || sign::write(&name, n, &pages).map_err(|e| e.to_string()),
+                move |r| {
+                    busy.set(false);
+                    match r {
+                        Ok(()) => {
+                            pgs.set_value(count as f64);
+                            msg.set_label("Zapisano w tablicy");
+                        }
+                        Err(e) => msg.set_label(&format!("Błąd zapisu: {e}")),
+                    }
+                },
+            );
         }
-        _ => eprintln!("read|write"),
+    });
+
+    app.run().unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_roundtrip_keeps_page_shape() {
+        let body = (1..=10)
+            .map(|i| format!("linia {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let pages = to_pages("TYTUŁ", &body).unwrap();
+        assert_eq!(pages.len(), 3); // meta + 2 body pages
+        let bytes = file_bytes(&pages);
+        let lines: Vec<&[u8]> = bytes.split(|&b| b == b'\n').collect();
+        assert_eq!(lines.len(), 3 * 11 + 1); // 3 header lines + 8 rows per page, + trailing empty
+        assert!(lines.iter().all(|l| l.len() <= COLS + 1)); // + '\r'
+        let back = parse(&bytes).unwrap();
+        assert_eq!(decode(&back[0]), "TYTUŁ");
+        assert_eq!(body_text(&back[1..]), body);
+        assert!(parse(b"123456789012345678901").is_err()); // 21 chars
     }
-    Ok(())
 }

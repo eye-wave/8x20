@@ -1,0 +1,121 @@
+# Themes, in menu order; the first one is the default. build.rs turns this into Rust (the
+# `THEMES` table in theme.rs), so a new theme is a new entry here + its tex/<dir>/bg.png.
+# Colours are 0xRRGGBB.
+#
+#   key      saved in the config file
+#   name     shown in the app
+#   bg       backdrop, relative to tex/
+#   colors   UI colours (see `Colors` in theme.rs)
+#   season   optional; DD-MM .. DD-MM inclusive (may wrap over New Year). While "Motywy
+#            okolicznościowe" is on, the theme activates itself on those days.
+#   recolor  optional; source colour in tex/*.svg -> replacement. The SVGs are drawn once in
+#            the default palette and recoloured on load. A theme that recolours anything must
+#            list every colour (`cargo test` checks it); build.rs rejects colours not in the SVGs.
+#            "white" in the SVGs counts as 0xFFFFFF.
+
+- key: domyslny
+  name: Domyślny
+  bg: bg.png
+  colors:
+    label: 0xEED590
+    panel: 0xFBF3DC
+    accent: 0xEED590
+    rule: 0xC8BE96
+    scrim: 0x1A2A1E
+    page_line: 0x787878
+    marks: 0xA0A0A0
+    text: 0x7A6C3C
+    text_bg: 0xFBF4DD
+    page_info: 0x244A30
+
+- key: christmas
+  name: Boże Narodzenie
+  bg: christmas/bg.png
+  season: { from: "25-12", to: "02-02" }
+  colors:
+    label: 0xFAE39C # gold ornament on the navy status bar
+    panel: 0xF0F7FD # icy panel fill
+    accent: 0xF7C631 # bauble gold
+    rule: 0xA5CAE7 # panel border blue
+    scrim: 0x0D1E35 # top/bottom bar navy
+    page_line: 0x7AA3C8 # darker border blue, readable on the white editor
+    marks: 0xA5CAE7
+    text: 0xC9A54A # bar navy: the darkest sampled navy, best contrast
+    text_bg: 0x0E182C # editor fill sampled from the bg
+    page_info: 0xF6DFA0 # navy of the "Numer tekstu:" label baked into the bg
+  recolor:
+    # shared: glyphs & outlines
+    0x6C643E: 0x163254 # glyph fill
+    0x2B2A1E: 0x0C1D32 # dark glyph fill
+    0x1E4B2C: 0x122844 # outline
+    0x2F4A36: 0x293D52 # outline
+    # shared: button face gradient, light to darker
+    0xFFFDF4: 0xFDFEFF # face highlight
+    0xFCEFC0: 0xEEF6FC # face
+    0xF0E3B8: 0xD6E8F6 # face
+    0xF2D98B: 0xBCD8EE # face shade
+    # shared: borders and rims
+    0xD6C288: 0xA4C9E7 # light border
+    0xB8964E: 0x7AA3C8 # border
+    0xEED590: 0xFAE39C # status-dot / "nowy" rim (= Colors.label)
+    0xF6EBC8: 0xE8F3FC # window-button rim
+    0xB9A56A: 0x7AA3C8 # separator line
+    0xFFFFFF: 0xFFFFFF # highlights (SVG "white")
+    # window buttons
+    0xC0392B: 0xB8252A # close hover fill
+    0x47664F: 0x475566 # minimise hover fill
+    # nowy (green)
+    0x14331F: 0x14331F # off stroke
+    0x1B4528: 0x1B452A # off stop
+    0x2F6B41: 0x2F6B45 # off stop
+    0x4E8A5E: 0x4E8A64 # off stop
+    0x245B35: 0x245B38 # on stop
+    0x3F8556: 0x3F8558 # on stop
+    0x6FAE7E: 0x6FAE86 # on stop
+    # wyslij (lime green)
+    0x506C3E: 0x3E6C4F # off fill
+    0xA6D688: 0x88D6A4 # off stroke
+    0xCAF0B8: 0xB8F0CC # off stop
+    0xF8FFF4: 0xF4FFF8 # off stop
+    0x536C3E: 0x3E6C4F # on fill
+    0x77B84E: 0x4EB875 # on stroke
+    0xA3F28B: 0x8BF2B0 # on stop
+    0xD3FCC0: 0xC0FCD6 # on stop
+    # odczytaj (rose)
+    0x6C3E46: 0x6C3E40 # off fill
+    0xD68899: 0xD6888B # off stroke
+    0xF0B8B9: 0xF0B8BA # off stop
+    0xFFF4F5: 0xFFF4F4 # off stop
+    0x6C3E3F: 0x6C3E40 # on fill
+    0xB84E50: 0xB84E52 # on stroke
+    0xF28B8D: 0xF28B8F # on stop
+    0xFCC0C3: 0xFCC0C2 # on stop
+    # przerwij (orange)
+    0x6C533E: 0x6C5E3E # off fill
+    0xD6AF88: 0xD6BF88 # off stroke
+    0xF0D9B8: 0xF0DFB8 # off stop
+    0xFCDEC0: 0xFCEAC0 # off/on stop
+    0x6C5A3E: 0x6C5E3E # on fill
+    0xB8834E: 0xB8984E # on stroke
+    0xF2CB8B: 0xF2D38B # on stop
+    # status dots
+    0x3A9A1E: 0x1E9A4B # on edge
+    0xC6F27A: 0x7AF2A6 # on centre
+    0x9A1E2A: 0x9A1E22 # off edge
+    0xF27A98: 0xF27A7E # off centre
+
+- key: easter
+  name: Wielkanoc
+  bg: easter/bg.png
+  season: { from: "22-03", to: "26-04" }
+  colors:
+    label: 0xEED590
+    panel: 0xFBF3DC
+    accent: 0xEED590
+    rule: 0xC8BE96
+    scrim: 0x1A2A1E
+    page_line: 0x787878
+    marks: 0xA0A0A0
+    text: 0x35502F
+    text_bg: 0xFAFDF4
+    page_info: 0xB65A86

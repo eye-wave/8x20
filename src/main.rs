@@ -2,12 +2,12 @@
 use encoding_rs::WINDOWS_1250;
 use fltk::{dialog::*, enums::*, frame::Frame, prelude::*, *};
 use std::{
-    cell::Cell,
-    cell::RefCell,
+    cell::{Cell, RefCell},
     fs,
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
+        LazyLock,
         atomic::{AtomicBool, Ordering::Relaxed},
         mpsc,
     },
@@ -16,61 +16,106 @@ use std::{
 mod engine;
 mod numinput;
 mod sign;
-
-use numinput::NumInput;
+mod theme;
 
 use engine::{Al, COLS, ROWS, align, align_line, bad, kill, put, rejoin, tidy, valign};
+use numinput::NumInput;
+use theme::{CUR, THEMES, Theme, apply_theme, img, pick_theme, png, seasonal_on, skin, theme};
 
-fn png(name: &str, d: &[u8]) -> image::PngImage {
-    image::PngImage::from_data(d).unwrap_or_else(|e| panic!("tex/{name}.png: {e}"))
-}
+pub static CONFIG_PATH: LazyLock<PathBuf> =
+    LazyLock::new(|| dirs::config_dir().unwrap().join(".tablica_cfg"));
 
-// The window icon (the OS needs a raster) and the backdrop (too fancy for nanosvg) stay PNG; everything else in tex/ is SVG.
-fn svg(name: &str, d: &str) -> image::SvgImage {
-    image::SvgImage::from_data(d).unwrap_or_else(|e| panic!("tex/{name}.svg: {e}"))
-}
-
-// Image button from tex/<name>_off.svg + tex/<name>_on.svg (on = hovered); the SVG's width/height set the size.
-fn btn(off: image::SvgImage, on: image::SvgImage, x: i32, y: i32) -> button::Button {
-    let mut b = button::Button::new(x, y, off.w(), off.h(), None);
+// Image button from <name>_off.svg + <name>_on.svg (on = hovered); the SVG's width/height set the size,
+// so every theme's textures must have the same sizes.
+fn btn(name: &'static str, x: i32, y: i32) -> button::Button {
+    let t = theme();
+    let imgs = Rc::new(RefCell::new((
+        img(t, &format!("{name}_off")),
+        img(t, &format!("{name}_on")),
+    )));
+    let (w, h) = (imgs.borrow().0.w(), imgs.borrow().0.h());
+    let mut b = button::Button::new(x, y, w, h, None);
     b.set_frame(FrameType::NoBox);
-    b.set_image(Some(off.clone()));
-    b.handle(move |b, ev| match ev {
-        Event::Enter | Event::Leave => {
-            b.set_image(Some(if ev == Event::Enter {
-                on.clone()
-            } else {
-                off.clone()
-            }));
-            b.redraw();
-            true
+    b.set_image(Some(imgs.borrow().0.clone()));
+    b.handle({
+        let imgs = imgs.clone();
+        move |b, ev| match ev {
+            Event::Enter | Event::Leave => {
+                let i = imgs.borrow();
+                b.set_image(Some(if ev == Event::Enter {
+                    i.1.clone()
+                } else {
+                    i.0.clone()
+                }));
+                b.redraw();
+                true
+            }
+            _ => false,
         }
-        _ => false,
+    });
+    skin({
+        let mut b = b.clone();
+        move |t| {
+            let n = (
+                img(t, &format!("{name}_off")),
+                img(t, &format!("{name}_on")),
+            );
+            b.set_image(Some(n.0.clone()));
+            *imgs.borrow_mut() = n;
+            b.redraw();
+        }
     });
     b
 }
 
-macro_rules! btn {
-    ($n:literal, $x:expr, $y:expr) => {
-        btn(
-            svg(
-                concat!($n, "_off"),
-                include_str!(concat!("../tex/", $n, "_off.svg")),
-            ),
-            svg(
-                concat!($n, "_on"),
-                include_str!(concat!("../tex/", $n, "_on.svg")),
-            ),
-            $x,
-            $y,
-        )
-    };
+// Config = "key=value" lines. Parsing is split from file I/O so it can be tested.
+fn parse_get(t: &str, k: &str) -> Option<String> {
+    t.lines().find_map(|l| {
+        let (key, v) = l.split_once('=')?;
+        (key.trim() == k).then(|| v.trim().to_string())
+    })
 }
 
-// Decorative separator (tex/sep.svg), vertically centred on cy.
-fn sep(img: &image::SvgImage, x: i32, cy: i32) {
-    let mut f = Frame::new(x, cy - img.h() / 2, img.w(), img.h(), None);
-    f.set_image(Some(img.clone()));
+fn parse_set(t: &str, k: &str, v: &str) -> String {
+    let mut out: String = t
+        .lines()
+        .filter(|l| l.split_once('=').is_none_or(|(key, _)| key.trim() != k))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    out += &format!("{k}={v}\n");
+    out
+}
+
+pub fn cfg_get(k: &str) -> Option<String> {
+    parse_get(&fs::read_to_string(&*CONFIG_PATH).ok()?, k)
+}
+
+pub fn cfg_set(k: &str, v: &str) {
+    let old = fs::read_to_string(&*CONFIG_PATH).unwrap_or_default();
+    let _ = fs::write(&*CONFIG_PATH, parse_set(&old, k, v));
+}
+
+// Decorative separator (sep.svg), vertically centred on cy.
+fn sep(x: i32, cy: i32) {
+    let i = img(theme(), "sep");
+    let mut f = Frame::new(x, cy - i.h() / 2, i.w(), i.h(), None);
+    f.set_image(Some(i));
+    skin(move |t| {
+        f.set_image(Some(img(t, "sep")));
+        f.redraw();
+    });
+}
+
+fn paint_dot(d: &mut Frame, t: &Theme, ok: bool) {
+    d.set_image(Some(img(
+        t,
+        if ok {
+            "status_dot_on"
+        } else {
+            "status_dot_off"
+        },
+    )));
+    d.redraw();
 }
 
 fn default_title() -> String {
@@ -82,6 +127,18 @@ fn lbl(text: &str, x: i32, y: i32, w: i32, h: i32, size: i32) -> Frame {
     f.set_label(text);
     f.set_label_size(size);
     f.set_align(Align::Left | Align::Inside);
+    f
+}
+
+// Counter labels ("K: 1   W: 1", "Strona - 001"): coloured by the theme's `page_info`.
+fn page_info(f: Frame) -> Frame {
+    let paint = |f: &mut Frame, t: &theme::Theme| {
+        f.set_label_color(Color::from_hex(t.colors.page_info));
+        f.redraw();
+    };
+    let mut c = f.clone();
+    paint(&mut c, theme());
+    skin(move |t| paint(&mut c, t));
     f
 }
 
@@ -107,6 +164,17 @@ fn editor(
     ed.set_frame(FrameType::FlatBox);
     ed.set_text_font(FONT);
     ed.set_text_size(SIZE);
+    let colour = |e: &mut text::TextEditor, t: &theme::Theme| {
+        e.set_color(Color::from_hex(t.colors.text_bg));
+        e.set_text_color(Color::from_hex(t.colors.text));
+        e.set_cursor_color(Color::from_hex(t.colors.text)); // the caret follows the text colour
+        e.redraw();
+    };
+    colour(&mut ed, theme());
+    skin({
+        let mut e = ed.clone();
+        move |t| colour(&mut e, t)
+    });
     ed.set_scrollbar_size(bar);
     ed.set_scrollbar_align(Align::Right); // vertical bar only: fltk shows the horizontal one only if TOP/BOTTOM is set
     // Tab: not handled by the editor, so fltk moves focus to the next widget instead of inserting.
@@ -139,7 +207,7 @@ fn editor(
             b.count_lines(0, from),
             e.position_to_xy(b.line_start(from)).1,
         );
-        draw::set_draw_color(Color::from_rgb(120, 120, 120));
+        draw::set_draw_color(Color::from_hex(theme().colors.page_line));
         for r in 0..=e.h() / lh + 1 {
             if pages && (n0 + r) % ROWS == 0 && n0 + r > 0 {
                 draw::draw_line(e.x(), y0 + r * lh, e.x() + e.w() - 12, y0 + r * lh);
@@ -147,7 +215,7 @@ fn editor(
         }
         if show.get() {
             let to = e.xy_to_position(e.x() + e.w(), e.y() + e.h(), text::PositionType::Cursor);
-            draw::set_draw_color(Color::from_rgb(160, 160, 160));
+            draw::set_draw_color(Color::from_hex(theme().colors.marks));
             for (i, ch) in b.text().char_indices() {
                 let i = i as i32;
                 let g = match ch {
@@ -163,12 +231,6 @@ fn editor(
         draw::pop_clip();
     });
     (ed, buf)
-}
-
-// Last port that worked, remembered between launches (best effort, errors ignored).
-fn cache() -> PathBuf {
-    let dir = std::env::var_os("APPDATA").or_else(|| std::env::var_os("HOME"));
-    PathBuf::from(dir.unwrap_or_else(|| ".".into())).join(".tablica_port")
 }
 
 type OnDrop = Rc<dyn Fn(PathBuf)>;
@@ -622,21 +684,27 @@ fn close_overlay(g: &mut group::Group, ed: &mut text::TextEditor) {
 // is behind it and swallows every mouse/key event, so nothing underneath can be touched.
 // UI only for now: none of the controls do anything yet.
 fn more_overlay(ed: &text::TextEditor) -> group::Group {
-    let (ox, oy) = ((960 - 460) / 2, (728 - 440) / 2);
+    // Theme thumbnails sit in a grid of 3 columns; each cell is a 128x100 thumbnail + a 44px wrapped
+    // label (row pitch 156). At most 2 rows are shown, further rows scroll, so the dialog never
+    // outgrows the window. `dy` = how much taller the dialog is than with the old single thumbnail row.
+    let rows = THEMES.len().div_ceil(3) as i32;
+    let vh = rows.min(2) * 156 - 8;
+    let dy = vh - 100;
+    let (ox, oy) = ((960 - 460) / 2, (728 - (440 + dy)) / 2);
     let mut g = group::Group::new(0, 0, 960, 728, None);
 
     // dim the app behind with a 50% stipple (FLTK has no alpha fill)
     let mut scrim = Frame::new(0, 0, 960, 728, None);
     scrim.draw(|f| {
-        draw::set_draw_color(Color::from_hex(0x1A2A1E));
+        draw::set_draw_color(Color::from_hex(theme().colors.scrim));
         for y in (f.y()..f.y() + f.h()).step_by(2) {
             draw::draw_line(f.x(), y, f.x() + f.w(), y);
         }
     });
 
-    let mut panel = Frame::new(ox, oy, 460, 440, None);
+    let mut panel = Frame::new(ox, oy, 460, 440 + dy, None);
     panel.set_frame(FrameType::BorderBox);
-    panel.set_color(Color::from_hex(0xFBF3DC));
+    panel.set_color(Color::from_hex(theme().colors.panel));
 
     let mut title = lbl("Dodatki", ox + 16, oy + 12, 428, 28, 20);
     title.set_label_font(Font::HelveticaBold);
@@ -645,33 +713,77 @@ fn more_overlay(ed: &text::TextEditor) -> group::Group {
     psalms.set_tooltip("Pobieranie Psalmów na miesiąc");
 
     let mut themes = button::CheckButton::new(ox + 16, oy + 104, 428, 24, "Motywy okolicznościowe");
-    themes.set_value(true);
+    themes.set_value(seasonal_on());
 
-    // background thumbnails (radio: one selected). a single bg for now, push more into the array.
-    let bgs = [png("bg", include_bytes!("../tex/bg.png"))];
-    for (i, mut img) in bgs.into_iter().enumerate() {
-        img.scale(120, 91, true, true);
-        let mut b = button::RadioButton::new(ox + 16 + 136 * i as i32, oy + 136, 128, 100, None);
+    // theme thumbnails (radio: one selected) with their names; clicking one applies and saves it
+    let mut sc = group::Scroll::new(ox + 16, oy + 136, 428, vh, None);
+    sc.set_type(group::ScrollType::Vertical);
+    sc.set_scrollbar_size(12);
+    sc.set_frame(FrameType::FlatBox);
+    sc.set_color(Color::from_hex(theme().colors.panel));
+    let mut radios = vec![];
+    for (i, (key, t)) in THEMES.iter().enumerate() {
+        let (cx, cy) = (
+            ox + 16 + 136 * (i % 3) as i32,
+            oy + 136 + 156 * (i / 3) as i32,
+        );
+        let mut thumb = png("bg", t.bg);
+        thumb.scale(120, 91, true, true);
+        let mut b = button::RadioButton::new(cx, cy, 128, 100, None);
         b.set_frame(FrameType::BorderBox);
         b.set_down_frame(FrameType::BorderBox);
         b.set_color(Color::White);
-        b.set_selection_color(Color::from_hex(0xEED590));
-        b.set_image(Some(img));
-        b.set_value(i == 0);
+        b.set_selection_color(Color::from_hex(theme().colors.accent));
+        b.set_image(Some(thumb));
+        b.set_tooltip(t.name);
+        b.set_value(i == CUR.get());
+        b.set_callback(move |_| {
+            apply_theme(i);
+            cfg_set("theme", key);
+        });
+        radios.push(b);
+        let mut name = Frame::new(cx, cy + 104, 128, 44, None);
+        name.set_label(t.name);
+        name.set_label_size(12);
+        name.set_align(Align::Top | Align::Inside | Align::Wrap | Align::Clip); // wraps, never spills out
     }
+    sc.end();
+    themes.set_callback({
+        let mut radios = radios.clone();
+        move |c| {
+            cfg_set("seasonal", if c.value() { "1" } else { "0" });
+            apply_theme(pick_theme());
+            for (i, r) in radios.iter_mut().enumerate() {
+                r.set_value(i == CUR.get());
+            }
+        }
+    });
 
-    let mut line = Frame::new(ox + 16, oy + 248, 428, 1, None);
+    let mut line = Frame::new(ox + 16, oy + 248 + dy, 428, 1, None);
     line.set_frame(FrameType::FlatBox);
-    line.set_color(Color::from_rgb(200, 190, 150));
-    lbl("Przetwarzanie wsadowe", ox + 16, oy + 256, 428, 24, 14);
+    line.set_color(Color::from_hex(theme().colors.rule));
+    lbl("Przetwarzanie wsadowe", ox + 16, oy + 256 + dy, 428, 24, 14);
     // batch read / write / interrupt: the same textures as the toolbar (the main interrupt is under the overlay)
-    btn!("odczytaj", ox + 16, oy + 284);
-    btn!("wyslij", ox + 88, oy + 284);
-    btn!("przerwij", ox + 160, oy + 284);
-    let mut prog = lbl(&bar(0, 1), ox + 16, oy + 356, 428, 24, 13);
+    btn("odczytaj", ox + 16, oy + 284 + dy);
+    btn("wyslij", ox + 88, oy + 284 + dy);
+    btn("przerwij", ox + 160, oy + 284 + dy);
+    let mut prog = lbl(&bar(0, 1), ox + 16, oy + 356 + dy, 428, 24, 13);
     prog.set_label_font(FONT);
+    skin({
+        let (mut radios, mut sc) = (radios.clone(), sc.clone());
+        move |t| {
+            panel.set_color(Color::from_hex(t.colors.panel));
+            sc.set_color(Color::from_hex(t.colors.panel));
+            sc.redraw();
+            line.set_color(Color::from_hex(t.colors.rule));
+            for r in radios.iter_mut() {
+                r.set_selection_color(Color::from_hex(t.colors.accent));
+            }
+            panel.redraw();
+        }
+    });
 
-    let mut close = button::Button::new(ox + 344, oy + 398, 100, 28, "Zamknij");
+    let mut close = button::Button::new(ox + 344, oy + 398 + dy, 100, 28, "Zamknij");
     close.set_callback({
         let mut ed = ed.clone();
         move |b| {
@@ -717,11 +829,12 @@ fn main() {
     app::set_visible_focus(false);
     app::set_font_size(14);
 
+    CUR.set(pick_theme()); // seasonal / saved theme, before any widget is built
     let mut win = window::Window::default()
         .with_size(960, 728)
-        .with_label("Notatnik");
+        .with_label("Tablica");
     win.set_border(false);
-    win.set_icon(Some(png("icon", include_bytes!("../tex/icon.png"))));
+    win.set_icon(Some(png("icon", theme::ICON)));
     win.size_range(960, 728, 0, 0); // resizable by the window manager (needed for maximize)
 
     // All content lives in one fixed-size group that is centered when the window grows.
@@ -729,7 +842,14 @@ fn main() {
 
     // backdrop: title bar, toolbar/page panels, captions and editor frames are baked into one texture
     let mut backdrop = Frame::new(0, 0, 960, 728, None);
-    backdrop.set_image(Some(png("bg", include_bytes!("../tex/bg.png"))));
+    backdrop.set_image(Some(png("bg", theme().bg)));
+    skin({
+        let mut b = backdrop.clone();
+        move |t| {
+            b.set_image(Some(png("bg", t.bg)));
+            b.redraw();
+        }
+    });
 
     // drag the borderless window by its title bar
     let mut top = Frame::new(0, 0, 960, 66, None);
@@ -751,8 +871,8 @@ fn main() {
     });
 
     // window buttons (the button SVGs are baked onto bg.png at exactly these positions)
-    let mut min = btn!("min", 882, 12);
-    let mut close = btn!("close", 928, 12);
+    let mut min = btn("min", 882, 12);
+    let mut close = btn("close", 928, 12);
     min.set_callback({
         let mut w = win.clone();
         move |_| w.iconize()
@@ -760,69 +880,84 @@ fn main() {
     close.set_callback(|_| app::quit());
 
     // toolbar
-    let mut new = btn!("nowy", 19, 82);
-    let mut open = btn!("otworz", 87, 82);
-    let mut save = btn!("zapisz", 155, 82);
-    let mut get = btn!("odczytaj", 223, 82);
-    let mut put_sign = btn!("wyslij", 291, 82);
+    let mut new = btn("nowy", 19, 82);
+    let mut open = btn("otworz", 87, 82);
+    let mut save = btn("zapisz", 155, 82);
+    let mut get = btn("odczytaj", 223, 82);
+    let mut put_sign = btn("wyslij", 291, 82);
     // interrupt button: right after wyslij (must be made before root.end())
-    let mut stop = btn!("przerwij", 359, 82);
+    let mut stop = btn("przerwij", 359, 82);
     // slot number above read, page count above write (centred over the 64px buttons)
     let mut num = NumInput::new(229, 56, 0, 999, false);
     num.set_value(1);
     let pgs = NumInput::new(297, 56, 0, 127, true); // 0 = auto
-    let mut more = btn!("ustaw", 814, 82); // "Więcej"; rename the tex/ustaw_*.svg pair and this string together
-    let mut info = btn!("info", 882, 82);
+    let mut more = btn("dodatki", 814, 82); // "Więcej";
+    let mut info = btn("info", 882, 82);
     // Groups left to right: files (64px) | horizontal align (36px each, 4px apart) |
     // vertical align (top / centred) | invisibles | settings. The groups after the files use
     // 12px gutters around a 2px separator because the toolbar is tight.
     let (mut left, mut center, mut right, mut just) = (
-        btn!("lewo", 449, 100),
-        btn!("srodek", 489, 100),
-        btn!("prawo", 529, 100),
-        btn!("justuj", 569, 100),
+        btn("lewo", 449, 100),
+        btn("srodek", 489, 100),
+        btn("prawo", 529, 100),
+        btn("justuj", 569, 100),
     );
-    let (mut vtop, mut vmid) = (btn!("pion_gora", 631, 100), btn!("pion_srodek", 671, 100));
-    let mut marks = btn!("znaki", 733, 100);
-    let sp = svg("sep", include_str!("../tex/sep.svg"));
+    let (mut vtop, mut vmid) = (btn("pion_gora", 631, 100), btn("pion_srodek", 671, 100));
+    let mut marks = btn("znaki", 733, 100);
     for x in [435, 617, 719, 793] {
-        sep(&sp, x, 118);
+        sep(x, 118);
     }
-    info.set_callback(|_| message_default("Notatnik – prosty edytor tekstu"));
+
+    const INFO: &str = concat!(
+        "Tablica świetlna 8x20\n",
+        "Wersja aplikacji: v",
+        env!("CARGO_PKG_VERSION")
+    );
+
+    info.set_callback(|_| message_default(INFO));
 
     let show = Rc::new(Cell::new(false));
 
     // left panel: title page
-    let kw1 = lbl("K: 1   W: 1", 290, 183, 120, 34, 14);
+    let kw1 = page_info(lbl("K: 1   W: 1", 290, 183, 120, 34, 14));
     let (mut title_ed, mut title_buf) = editor(36, 227, 1, 8, show.clone(), false);
     rules(&mut title_ed, &title_buf, Some(ROWS), kw1, None);
     title_buf.set_text(&default_title());
 
     // right panel: page
-    let page = lbl("Strona - 001", 586, 183, 200, 34, 17);
-    let kw2 = lbl("K: 1   W: 1", 804, 183, 120, 34, 14);
-    let mut search = btn!("szukaj", 898, 186);
+    let page = page_info(lbl("Strona - 001", 586, 183, 200, 34, 17));
+    let kw2 = page_info(lbl("K: 1   W: 1", 804, 183, 120, 34, 14));
+    let mut search = btn("szukaj", 898, 186);
     let (mut ed, buf) = editor(550, 227, 12, 48, show.clone(), true);
     rules(&mut ed, &buf, None, kw2, Some(page));
 
     // status bar
     let mut com = lbl("COM-", 60, 676, 100, 24, 16);
-    com.set_label_color(Color::from_hex(0xEED590));
+    com.set_label_color(Color::from_hex(theme().colors.label));
     let mut msg = lbl("", 300, 670, 345, 24, 13); // the status widget in the middle of the bar
     msg.set_align(Align::Center | Align::Inside);
-    msg.set_label_color(Color::from_hex(0xEED590)); // same as the COM label
+    msg.set_label_color(Color::from_hex(theme().colors.label)); // same as the COM label
+    skin({
+        let (mut c, mut m) = (com.clone(), msg.clone());
+        move |t| {
+            for w in [&mut c, &mut m] {
+                w.set_label_color(Color::from_hex(t.colors.label));
+                w.redraw();
+            }
+        }
+    });
     // connection status dot, left of the port dropdown: green after a successful read/write,
     // red after a failure and whenever another port is picked
-    let (dot_on, dot_off) = (
-        svg("status_dot_on", include_str!("../tex/status_dot_on.svg")),
-        svg("status_dot_off", include_str!("../tex/status_dot_off.svg")),
-    );
+    let ok = Rc::new(Cell::new(false));
     let mut dot = Frame::new(709, 679, 15, 15, None);
-    dot.set_image(Some(dot_off.clone()));
-    let set_dot: Rc<dyn Fn(bool)> = Rc::new(move |ok| {
-        let mut d = dot.clone();
-        d.set_image(Some(if ok { dot_on.clone() } else { dot_off.clone() }));
-        d.redraw();
+    paint_dot(&mut dot, theme(), false);
+    skin({
+        let (mut d, ok) = (dot.clone(), ok.clone());
+        move |t| paint_dot(&mut d, t, ok.get())
+    });
+    let set_dot: Rc<dyn Fn(bool)> = Rc::new(move |v| {
+        ok.set(v);
+        paint_dot(&mut dot.clone(), theme(), v);
     });
     let mut names = sign::ports();
     names.sort_by(|a, b| natural_cmp(a, b).then_with(|| a.cmp(b)));
@@ -843,10 +978,7 @@ fn main() {
     });
 
     // reselect the port that last worked (if it is still plugged in)
-    if let Some(i) = fs::read_to_string(cache())
-        .ok()
-        .and_then(|s| ports.iter().position(|p| *p == s.trim()))
-    {
+    if let Some(i) = cfg_get("port").and_then(|s| ports.iter().position(|p| *p == s)) {
         port.set_value(i as i32 + 1);
         com.set_label(&ports[i]);
     }
@@ -1063,7 +1195,7 @@ fn main() {
                     msg.set_label_font(Font::Helvetica);
                     set_dot(r.is_ok());
                     if r.is_ok() {
-                        let _ = fs::write(cache(), saved);
+                        cfg_set("port", &saved);
                     }
                     match r {
                         Ok(pages) => {
@@ -1115,7 +1247,7 @@ fn main() {
                     busy.set(false);
                     set_dot(r.is_ok());
                     if r.is_ok() {
-                        let _ = fs::write(cache(), saved);
+                        cfg_set("port", &saved);
                     }
                     match r {
                         Ok(()) => {
@@ -1139,6 +1271,15 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cfg_parse_keeps_other_keys() {
+        let t = parse_set("theme=dark\r\nport = COM3\r\n", "port", "COM4");
+        assert_eq!(parse_get(&t, "port").as_deref(), Some("COM4"));
+        assert_eq!(parse_get(&t, "theme").as_deref(), Some("dark"));
+        assert_eq!(parse_get(&t, "seasonal"), None);
+        assert_eq!(parse_get("COM3", "port"), None); // legacy bare-port file: ignored, not a crash
+    }
 
     #[test]
     fn file_roundtrip_keeps_page_shape() {

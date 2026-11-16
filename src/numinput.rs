@@ -1,5 +1,6 @@
 //! Number input without arrows: digits only, clamped to `max`; empty input snaps to `min` on blur.
 //! With `auto`, 0 is shown as "auto" and a click clears it so the user can type.
+use crate::theme::{Theme, skin, theme};
 use fltk::{enums::*, input::Input, prelude::*};
 
 #[derive(Clone)]
@@ -28,6 +29,18 @@ fn fix(i: &mut Input, min: u32, max: u32, auto: bool) {
 impl NumInput {
     pub fn new(x: i32, y: i32, min: u32, max: u32, auto: bool) -> Self {
         let mut i = Input::new(x, y, 52, 24, None);
+        let paint = |i: &mut Input, t: &Theme| {
+            i.set_color(Color::from_hex(t.colors.text_bg));
+            i.set_text_color(Color::from_hex(t.colors.text));
+            i.set_cursor_color(Color::from_hex(t.colors.text));
+            i.set_selection_color(Color::from_hex(t.colors.accent));
+            i.redraw();
+        };
+        paint(&mut i, theme());
+        skin({
+            let mut i = i.clone();
+            move |t| paint(&mut i, t)
+        });
         i.set_trigger(CallbackTrigger::Changed);
         i.set_callback(move |i| {
             let d: String = i.value().chars().filter(char::is_ascii_digit).collect();
@@ -42,7 +55,7 @@ impl NumInput {
         });
         i.super_handle_first(false); // so drops reach our handler before FLTK pastes them
         i.handle(move |i, ev| {
-            if crate::dnd(ev) {
+            if crate::dnd::dnd(ev) {
                 return true;
             }
             match ev {

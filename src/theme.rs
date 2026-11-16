@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 
-use fltk::{app, image};
+use fltk::{app, enums::Color, image};
 
 // ---- themes ----------------------------------------------------------------------------------
 // The theme list lives in themes.yaml; build.rs (themes_build.rs) turns it into the `THEMES` table
@@ -86,8 +86,18 @@ pub fn skin(f: impl FnMut(&Theme) + 'static) {
     SKINS.with(|s| s.borrow_mut().push(Box::new(f)));
 }
 
+// FLTK's own gray (dialogs, menus, scrollbars, plain buttons) -> the theme's panel / dark text colour.
+pub fn tint() {
+    let c = &theme().colors;
+    let (r, g, b) = Color::from_hex(c.panel).to_rgb();
+    app::background(r, g, b);
+    let (r, g, b) = Color::from_hex(c.scrim).to_rgb();
+    app::foreground(r, g, b);
+}
+
 pub fn apply_theme(i: usize) {
     CUR.set(i);
+    tint();
     SKINS.with(|s| s.borrow_mut().iter_mut().for_each(|f| f(theme())));
     app::redraw();
 }

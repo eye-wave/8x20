@@ -46,6 +46,12 @@ macro_rules! btn {
     };
 }
 
+// Decorative separator (tex/sep.png), vertically centred on cy.
+fn sep(img: &image::PngImage, x: i32, cy: i32) {
+    let mut f = Frame::new(x, cy - img.h() / 2, img.w(), img.h(), None);
+    f.set_image(Some(img.clone()));
+}
+
 fn lbl(text: &str, x: i32, y: i32, w: i32, h: i32, size: i32) -> Frame {
     let mut f = Frame::new(x, y, w, h, None);
     f.set_label(text);
@@ -68,10 +74,16 @@ const SIZE: i32 = 30;
 
 // Editor box is exactly COLS x ROWS character cells (fltk text margins: 3px sides, 1px top/bottom)
 // plus a vertical scrollbar of `bar` px (1 = effectively none).
-fn editor(x: i32, y: i32, bar: i32, show: Rc<Cell<bool>>) -> (text::TextEditor, text::TextBuffer) {
+fn editor(
+    x: i32,
+    y: i32,
+    bar: i32,
+    slack: i32,
+    show: Rc<Cell<bool>>,
+) -> (text::TextEditor, text::TextBuffer) {
     draw::set_font(FONT, SIZE);
     let w = COLS as i32 * draw::width("M").round() as i32 + 6 + bar;
-    let h = ROWS * draw::height() + 2;
+    let h = ROWS * draw::height() + 2 + slack; // slack: spare px so rounding never makes the last row scroll
     let buf = text::TextBuffer::default();
     let mut ed = text::TextEditor::new(x, y, w, h, None);
     ed.set_buffer(buf.clone());
@@ -495,27 +507,33 @@ fn main() {
     btn!("ustaw", 746, 82);
     btn!("opcje", 814, 82);
     let mut info = btn!("info", 882, 82);
+    // Groups left to right, 32px gutters, a 2px separator centred in each gutter between groups:
+    // files (64px) | align (36px, 4px apart) | invisibles (36px) | settings (64px)
     let (mut left, mut center, mut right, mut just) = (
-        btn!("lewo", 363, 82),
-        btn!("srodek", 431, 82),
-        btn!("prawo", 499, 82),
-        btn!("justuj", 567, 82),
+        btn!("lewo", 421, 100),
+        btn!("srodek", 461, 100),
+        btn!("prawo", 501, 100),
+        btn!("justuj", 541, 100),
     );
-    let mut marks = btn!("znaki", 635, 82);
+    let mut marks = btn!("znaki", 643, 100);
+    let sp = png("sep", include_bytes!("../tex/sep.png"));
+    for x in [387, 609, 712] {
+        sep(&sp, x, 118);
+    }
     info.set_callback(|_| message_default("Notatnik – prosty edytor tekstu"));
 
     let show = Rc::new(Cell::new(false));
 
     // left panel: title page
     let kw1 = lbl("K: 1   W: 1", 330, 183, 120, 34, 14);
-    let (mut title_ed, title_buf) = editor(36, 227, 1, show.clone());
+    let (mut title_ed, title_buf) = editor(36, 227, 1, 8, show.clone());
     rules(&mut title_ed, &title_buf, Some(ROWS), kw1, None);
 
     // right panel: page
     let page = lbl("Strona - 001", 522, 183, 200, 34, 17);
     let kw2 = lbl("K: 1   W: 1", 740, 183, 120, 34, 14);
     let mut search = btn!("szukaj", 898, 186);
-    let (mut ed, buf) = editor(486, 227, 12, show.clone());
+    let (mut ed, buf) = editor(486, 227, 12, 48, show.clone());
     rules(&mut ed, &buf, None, kw2, Some(page));
 
     // status bar

@@ -79,6 +79,7 @@ fn editor(x: i32, y: i32, bar: i32, show: Rc<Cell<bool>>) -> (text::TextEditor, 
     ed.set_text_font(FONT);
     ed.set_text_size(SIZE);
     ed.set_scrollbar_size(bar);
+    ed.set_scrollbar_align(Align::Right); // vertical bar only: fltk shows the horizontal one only if TOP/BOTTOM is set
     // Tab: not handled by the editor, so fltk moves focus to the next widget instead of inserting.
     ed.add_key_binding(Key::Tab, Shortcut::None, |_, _| 0);
     // Invisible characters: fltk can't show them, so paint · / ¶ over the visible range after the base draw.
@@ -120,18 +121,19 @@ enum Al {
 }
 
 // Plain text has no alignment attribute, so alignment is real padding: a line's leading/trailing
-// spaces are layout, never content, and are recomputed here. Only Justify touches inner spacing.
+// spaces are layout, never content, and are recomputed here. Every mode first normalizes inner space
+// runs to one space (otherwise a justified line could never be left/centered/right-aligned again).
 fn align_line(l: &str, a: Al) -> String {
-    let t = l.trim_matches(' ');
+    let w: Vec<&str> = l.split(' ').filter(|s| !s.is_empty()).collect();
+    let t = w.join(" ");
     let room = COLS.saturating_sub(t.chars().count());
     match a {
-        Al::Left => t.to_string(),
+        Al::Left => t,
         Al::Center => format!("{}{t}", " ".repeat(room / 2)),
         Al::Right => format!("{}{t}", " ".repeat(room)),
         Al::Justify => {
-            let w: Vec<&str> = t.split(' ').filter(|s| !s.is_empty()).collect();
             if w.len() < 2 {
-                return t.to_string();
+                return t;
             }
             let gaps = w.len() - 1;
             let sp = COLS.saturating_sub(w.iter().map(|s| s.chars().count()).sum());
@@ -435,6 +437,10 @@ fn main() {
         .with_size(960, 728)
         .with_label("Notatnik");
     win.set_border(false);
+    win.size_range(960, 728, 0, 0); // resizable by the window manager (needed for maximize)
+
+    // All content lives in one fixed-size group that is centered when the window grows.
+    let mut root = group::Group::new(0, 0, 960, 728, None);
 
     // backdrop: title bar, toolbar/page panels, captions and editor frames are baked into one texture
     let mut backdrop = Frame::new(0, 0, 960, 728, None);
@@ -446,11 +452,11 @@ fn main() {
     top.handle({
         let (mut w, off) = (win.clone(), off.clone());
         move |_, ev| match ev {
-            Event::Push => {
+            Event::Push if !w.maximize_active() => {
                 off.set((app::event_x_root() - w.x(), app::event_y_root() - w.y()));
                 true
             }
-            Event::Drag => {
+            Event::Drag if !w.maximize_active() => {
                 let (ox, oy) = off.get();
                 w.set_pos(app::event_x_root() - ox, app::event_y_root() - oy);
                 true
@@ -458,11 +464,23 @@ fn main() {
             _ => false,
         }
     });
-    let mut min = btn!("min", 886, 19);
-    let mut close = btn!("close", 918, 19);
+
+    let mut min = btn!("min", 836, 12);
+    let mut max = btn!("max", 882, 12);
+    let mut close = btn!("close", 928, 12);
     min.set_callback({
         let mut w = win.clone();
         move |_| w.iconize()
+    });
+    max.set_callback({
+        let mut w = win.clone();
+        move |_| {
+            if w.maximize_active() {
+                w.un_maximize()
+            } else {
+                w.maximize()
+            }
+        }
     });
     close.set_callback(|_| app::quit());
 
@@ -515,7 +533,9 @@ fn main() {
         move |p| com.set_label(&port_of(p).unwrap_or_else(|| "COM-".into()))
     });
 
+    root.end();
     win.end();
+    win.resize_callback(move |_, _, _, w, h| root.set_pos((w - 960) / 2, (h - 728) / 2));
     win.show();
 
     // alignment acts on the focused editor (body if none); clicks don't steal focus (visible_focus is off)
@@ -721,6 +741,9 @@ mod tests {
             format!("a{}b{}c", sp(9), sp(8))
         );
         assert_eq!(align_line("word", Al::Justify), "word");
+        let j = align_line("ab cd", Al::Justify); // justified lines must be undoable
+        assert_eq!(align_line(&j, Al::Left), "ab cd");
+        assert_eq!(align_line(&j, Al::Center), format!("{}ab cd", sp(7)));
     }
 
     #[test]

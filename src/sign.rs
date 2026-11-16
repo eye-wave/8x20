@@ -4,8 +4,22 @@
 use serialport::{ClearBuffer, SerialPort};
 use std::{
     io::{self, ErrorKind},
+    sync::atomic::{AtomicBool, Ordering::Relaxed},
     time::Duration,
 };
+
+// Set by the UI to abort the running transfer; checked before every send and in the rx loop.
+// one global flag (only one transfer runs at a time); reset when a transfer starts.
+static STOP: AtomicBool = AtomicBool::new(false);
+pub fn cancel() {
+    STOP.store(true, Relaxed);
+}
+fn chk() -> io::Result<()> {
+    if STOP.load(Relaxed) {
+        return Err(io::Error::new(ErrorKind::Interrupted, "przerwano"));
+    }
+    Ok(())
+}
 
 pub type Pages = Vec<Vec<Vec<u8>>>;
 
@@ -56,6 +70,7 @@ fn rx(p: &mut dyn SerialPort) -> io::Result<Vec<u8>> {
     let (mut v, mut b) = (vec![], [0u8; 256]);
     p.set_timeout(Duration::from_secs(3))?; // first byte may be slow
     loop {
+        chk()?;
         match p.read(&mut b) {
             Ok(0) => break,
             Ok(n) => {
@@ -71,6 +86,7 @@ fn rx(p: &mut dyn SerialPort) -> io::Result<Vec<u8>> {
 }
 
 fn send(p: &mut dyn SerialPort, f: &[u8]) -> io::Result<Vec<u8>> {
+    chk()?;
     p.clear(ClearBuffer::All)?; // exe purges RX+TX before every send
     p.write_all(f)?;
     rx(p)
@@ -119,6 +135,7 @@ fn blank(pg: &[Vec<u8>]) -> bool {
 /// Slot N: title page via cmd 1 + N, then pages 1..=pages via cmd 3 + page number.
 /// pages == 0 (auto): read until 3 blank pages in a row or page 127, then drop trailing blank pages.
 pub fn read(port: &str, n: u16, pages: u8) -> io::Result<Pages> {
+    STOP.store(false, Relaxed);
     let mut p = open(port)?;
     let mut out = vec![page(&mut *p, &frame(1, &n.to_be_bytes()))?];
     for k in 1..=if pages == 0 { 127 } else { pages } {
@@ -137,6 +154,7 @@ pub fn read(port: &str, n: u16, pages: u8) -> io::Result<Pages> {
 
 /// Every page as cmd 4 [page index, 8x20 bytes padded to 256] waiting for ack, then cmd 2 [N] commits the slot.
 pub fn write(port: &str, n: u16, pages: &Pages) -> io::Result<()> {
+    STOP.store(false, Relaxed);
     let mut p = open(port)?;
     for (k, rows) in pages.iter().enumerate() {
         let mut pl = vec![b' '; 257];

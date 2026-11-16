@@ -149,6 +149,12 @@ fn editor(
     (ed, buf)
 }
 
+// Last port that worked, remembered between launches (best effort, errors ignored).
+fn cache() -> PathBuf {
+    let dir = std::env::var_os("APPDATA").or_else(|| std::env::var_os("HOME"));
+    PathBuf::from(dir.unwrap_or_else(|| ".".into())).join(".tablica_port")
+}
+
 const DECO: &[u8] = b"<------------------>";
 
 // File format: every page (title page = 000 first) is DECO / "<- Strona nr: NNN ->" / DECO
@@ -534,6 +540,8 @@ fn main() {
     let mut save = btn!("zapisz", 155, 82);
     let mut get = btn!("odczytaj", 223, 82);
     let mut put_sign = btn!("wyslij", 291, 82);
+    // interrupt button: the wyslij texture again, right after it (must be made before root.end())
+    let mut stop = btn!("przerwij", 359, 82);
     // slot number above read, page count above write (centred over the 64px buttons)
     let mut num = NumInput::new(229, 56, 0, 999, false);
     num.set_value(1);
@@ -544,15 +552,15 @@ fn main() {
     // vertical align (top / centred) | invisibles | settings. The groups after the files use
     // 12px gutters around a 2px separator because the toolbar is tight.
     let (mut left, mut center, mut right, mut just) = (
-        btn!("lewo", 421, 100),
-        btn!("srodek", 461, 100),
-        btn!("prawo", 501, 100),
-        btn!("justuj", 541, 100),
+        btn!("lewo", 449, 100),
+        btn!("srodek", 489, 100),
+        btn!("prawo", 529, 100),
+        btn!("justuj", 569, 100),
     );
-    let (mut vtop, mut vmid) = (btn!("pion_gora", 603, 100), btn!("pion_srodek", 643, 100));
-    let mut marks = btn!("znaki", 705, 100);
+    let (mut vtop, mut vmid) = (btn!("pion_gora", 631, 100), btn!("pion_srodek", 671, 100));
+    let mut marks = btn!("znaki", 733, 100);
     let sp = png("sep", include_bytes!("../tex/sep.png"));
-    for x in [387, 589, 691, 765] {
+    for x in [435, 617, 719, 793] {
         sep(&sp, x, 118);
     }
     info.set_callback(|_| message_default("Notatnik – prosty edytor tekstu"));
@@ -575,7 +583,8 @@ fn main() {
     // status bar
     let mut com = lbl("COM-", 60, 676, 100, 24, 16);
     com.set_label_color(Color::from_hex(0xEED590));
-    let msg = lbl("", 170, 676, 530, 24, 13); // ends before the status dot
+    let mut msg = lbl("", 330, 676, 370, 24, 13); // right of the decoration, ends before the status dot
+    msg.set_label_color(Color::from_hex(0xEED590)); // same as the COM label
     // connection status dot, left of the port dropdown: green after a successful read/write,
     // red after a failure and whenever another port is picked
     let (dot_on, dot_off) = (
@@ -609,6 +618,15 @@ fn main() {
             set_dot(false);
         }
     });
+
+    // reselect the port that last worked (if it is still plugged in)
+    if let Some(i) = fs::read_to_string(cache())
+        .ok()
+        .and_then(|s| ports.iter().position(|p| *p == s.trim()))
+    {
+        port.set_value(i as i32 + 1);
+        com.set_label(&ports[i]);
+    }
 
     root.end();
     win.end();
@@ -762,6 +780,15 @@ fn main() {
 
     // projector read / write (slow serial I/O runs on a worker thread)
     let busy = Rc::new(Cell::new(false));
+    stop.set_callback({
+        let (busy, mut msg) = (busy.clone(), msg.clone());
+        move |_| {
+            if busy.get() {
+                sign::cancel();
+                msg.set_label("Przerywanie...");
+            }
+        }
+    });
     get.set_callback({
         let (port, ports, num, pgs, mut msg, buf, tbuf, busy, set_dot) = (
             port.clone(),
@@ -793,11 +820,15 @@ fn main() {
                 busy.clone(),
                 set_dot.clone(),
             );
+            let saved = name.clone();
             bg(
                 move || sign::read(&name, n, k).map_err(|e| e.to_string()),
                 move |r| {
                     busy.set(false);
                     set_dot(r.is_ok());
+                    if r.is_ok() {
+                        let _ = fs::write(cache(), saved);
+                    }
                     match r {
                         Ok(pages) => {
                             tbuf.set_text(&decode(&pages[0]));
@@ -841,11 +872,15 @@ fn main() {
             let (mut pgs, mut msg, busy, set_dot) =
                 (pgs.clone(), msg.clone(), busy.clone(), set_dot.clone());
             let count = pages.len() - 1;
+            let saved = name.clone();
             bg(
                 move || sign::write(&name, n, &pages).map_err(|e| e.to_string()),
                 move |r| {
                     busy.set(false);
                     set_dot(r.is_ok());
+                    if r.is_ok() {
+                        let _ = fs::write(cache(), saved);
+                    }
                     match r {
                         Ok(()) => {
                             pgs.set_value(count as u32);

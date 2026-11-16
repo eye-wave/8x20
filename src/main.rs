@@ -9,7 +9,7 @@ mod sign;
 
 use numinput::NumInput;
 
-use engine::{Al, COLS, ROWS, align, align_line, bad, kill, put, rejoin, tidy};
+use engine::{Al, COLS, ROWS, align, align_line, bad, kill, put, rejoin, tidy, valign};
 
 fn png(name: &str, d: &[u8]) -> image::PngImage {
     image::PngImage::from_data(d).unwrap_or_else(|e| panic!("tex/{name}.png: {e}"))
@@ -59,7 +59,7 @@ fn sep(img: &image::PngImage, x: i32, cy: i32) {
 }
 
 fn default_title() -> String {
-    align_line("TEKST NR ???", Al::Center)
+    align_line("TEKST NR 000", Al::Center)
 }
 
 fn lbl(text: &str, x: i32, y: i32, w: i32, h: i32, size: i32) -> Frame {
@@ -168,56 +168,128 @@ fn file_bytes(pages: &sign::Pages) -> Vec<u8> {
     out
 }
 
-// Inverse of file_bytes. Rows before the first header belong to page 0; a bad row or page is an error, never truncated.
-fn parse(txt: &[u8]) -> Result<sign::Pages, String> {
-    let mut l: Vec<&[u8]> = txt
-        .split(|&b| b == b'\n')
-        .map(|x| x.strip_suffix(b"\r").unwrap_or(x))
-        .collect();
-    if l.last().is_some_and(|x| x.is_empty()) {
-        l.pop();
-    }
-    let (mut pages, mut cur, mut i) = (vec![vec![]], 0usize, 0);
-    while i < l.len() {
-        if l[i] == DECO
-            && l.get(i + 2) == Some(&DECO)
-            && l.get(i + 1)
-                .is_some_and(|s| s.starts_with(b"<- Strona nr: "))
-        {
-            cur = l[i + 1]
-                .get(14..17)
-                .and_then(|d| std::str::from_utf8(d).ok())
-                .and_then(|d| d.parse().ok())
-                .ok_or(format!("Zły nagłówek strony, linia {}", i + 2))?;
-            if cur > 127 {
-                return Err(format!("Strona {cur} za wysoka (max 127)"));
-            }
-            pages.resize(pages.len().max(cur + 1), vec![]);
-            i += 3;
-            continue;
-        }
-        if l[i].len() > COLS {
-            return Err(format!("Linia {} ma więcej niż {COLS} znaków", i + 1));
-        }
-        pages[cur].push(l[i].to_vec());
-        if pages[cur].len() > ROWS as usize {
-            return Err(format!(
-                "Strona {cur} ma więcej niż {ROWS} linii (linia {})",
-                i + 1
-            ));
-        }
-        i += 1;
-    }
-    Ok(pages)
+// A decoration line such as <------------------> (only '<', '-' and '>' characters, at least one arrow).
+fn is_deco(l: &str) -> bool {
+    let t = l.trim();
+    t.contains(['<', '>']) && t.chars().all(|c| matches!(c, '<' | '-' | '>'))
 }
 
-// Pages 1.. as one editor body; each page padded to ROWS rows so editor lines stay aligned with pages.
-fn body_text(pages: &[Vec<Vec<u8>>]) -> String {
-    let padded: Vec<Vec<u8>> = pages
-        .iter()
-        .flat_map(|p| (0..ROWS as usize).map(move |i| p.get(i).cloned().unwrap_or_default()))
+// "<- Strona nr: 007 ->" -> Some(7); tolerant of spacing and of a missing closing arrow.
+fn page_header(l: &str) -> Option<usize> {
+    let d = l.trim().strip_prefix("<- Strona nr:")?.trim_start();
+    d.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
+}
+
+// Fit a line into COLS: soft wrap at the last space that fits (indent kept, the spaces at the break
+// dropped); a word longer than a line is hard-split at COLS. Tabs become spaces, other control
+// characters are dropped, trailing spaces are layout and removed.
+fn wrap_line(l: &str, soft: &mut usize, hard: &mut usize) -> Vec<String> {
+    let mut c: Vec<char> = l
+        .chars()
+        .map(|c| if c == '\t' { ' ' } else { c })
+        .filter(|c| !c.is_control())
         .collect();
-    decode(&padded)
+    while c.last() == Some(&' ') {
+        c.pop();
+    }
+    let mut out = vec![];
+    while c.len() > COLS {
+        let lead = c.iter().take_while(|&&x| x == ' ').count();
+        match (lead + 1..=COLS).rev().find(|&i| c[i] == ' ') {
+            Some(i) => {
+                out.push(c[..i].iter().collect::<String>().trim_end().to_string());
+                let k = i + c[i..].iter().take_while(|&&x| x == ' ').count();
+                c.drain(..k);
+                *soft += 1;
+            }
+            None => {
+                out.push(c[..COLS].iter().collect());
+                c.drain(..COLS);
+                *hard += 1;
+            }
+        }
+    }
+    out.push(c.into_iter().collect());
+    out
+}
+
+struct Loaded {
+    title: String,
+    body: String,
+    soft: usize, // lines that were soft wrapped
+    hard: usize, // lines that were hard wrapped
+}
+
+// Load a text file with or without the page decoration (DECO / "<- Strona nr: NNN ->" / DECO):
+// - decoration lines are optional and ignored; a "<- Strona nr: N ->" line alone starts page N;
+// - rows before the first header belong to the title page (page 0);
+// - a file with no header at all is plain text: all of it is the body, the title stays default;
+// - UTF-8 is accepted as well as Windows-1250;
+// - lines over COLS are soft/hard wrapped; a page that grows past ROWS rows spills onto an extra
+//   page (the following pages move down so no text is lost or merged).
+fn load(bytes: &[u8]) -> Result<Loaded, String> {
+    let text = match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_string(),
+        Err(_) => WINDOWS_1250.decode(bytes).0.into_owned(),
+    };
+    let text = text
+        .trim_start_matches('\u{feff}')
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    if lines.last().is_some_and(|x| x.is_empty()) {
+        lines.pop();
+    }
+    let (mut soft, mut hard) = (0, 0);
+    let mut pages: Vec<Vec<String>> = vec![vec![]];
+    let (mut cur, mut headed) = (0usize, false);
+    for l in lines {
+        if is_deco(l) {
+            continue;
+        }
+        if let Some(n) = page_header(l) {
+            if n > 127 {
+                return Err(format!("Strona {n} za wysoka (max 127)"));
+            }
+            (cur, headed) = (n, true);
+            if pages.len() <= n {
+                pages.resize(n + 1, vec![]);
+            }
+            continue;
+        }
+        pages[cur].extend(wrap_line(l, &mut soft, &mut hard));
+    }
+    let title = if headed {
+        let keep = pages[0].len().min(ROWS as usize);
+        let extra = pages[0].split_off(keep);
+        if !extra.is_empty() {
+            pages.insert(1, extra); // title rows beyond ROWS get a body page of their own
+        }
+        let mut t = pages[0].clone();
+        while t.last().is_some_and(|x| x.is_empty()) {
+            t.pop();
+        }
+        t.join("\n")
+    } else {
+        let all = std::mem::take(&mut pages[0]);
+        pages.push(all);
+        default_title()
+    };
+    let mut rows: Vec<String> = vec![];
+    for p in &pages[1..] {
+        let n = p.len().div_ceil(ROWS as usize).max(1) * ROWS as usize;
+        rows.extend(p.iter().cloned());
+        rows.resize(rows.len() + n - p.len(), String::new()); // pad to whole pages
+    }
+    while rows.last().is_some_and(|x| x.is_empty()) {
+        rows.pop();
+    }
+    Ok(Loaded {
+        title,
+        body: rows.join("\n"),
+        soft,
+        hard,
+    })
 }
 
 // Enforces the line rules on the buffer itself (so it works however fltk orders its key handling):
@@ -277,11 +349,48 @@ fn rules(
     });
 }
 
-fn port_of(c: &menu::Choice) -> Option<String> {
-    if c.value() > 0 {
-        c.text(c.value())
-    } else {
-        None
+// Selected port name (index 0 is the "not selected" entry). The names are kept separately because
+// FLTK's menu labels treat '/' as a submenu separator.
+fn port_of(c: &menu::Choice, names: &[String]) -> Option<String> {
+    usize::try_from(c.value() - 1)
+        .ok()
+        .and_then(|i| names.get(i).cloned())
+}
+
+// Digits-aware comparison: COM3 < COM10, ttyS3 < ttyS10; case-insensitive.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::{cmp::Ordering::*, iter::Peekable, str::Chars};
+    fn num(it: &mut Peekable<Chars>) -> String {
+        let mut s = String::new();
+        while let Some(&c) = it.peek().filter(|c| c.is_ascii_digit()) {
+            s.push(c);
+            it.next();
+        }
+        s
+    }
+    let (mut a, mut b) = (a.chars().peekable(), b.chars().peekable());
+    loop {
+        match (a.peek().copied(), b.peek().copied()) {
+            (None, None) => return Equal,
+            (None, _) => return Less,
+            (_, None) => return Greater,
+            (Some(x), Some(y)) if x.is_ascii_digit() && y.is_ascii_digit() => {
+                let (na, nb) = (num(&mut a), num(&mut b));
+                let (ta, tb) = (na.trim_start_matches('0'), nb.trim_start_matches('0'));
+                match ta.len().cmp(&tb.len()).then_with(|| ta.cmp(tb)) {
+                    Equal => {}
+                    o => return o,
+                }
+            }
+            (Some(x), Some(y)) => {
+                match x.to_lowercase().cmp(y.to_lowercase()) {
+                    Equal => {}
+                    o => return o,
+                }
+                a.next();
+                b.next();
+            }
+        }
     }
 }
 
@@ -321,18 +430,36 @@ fn decode(rows: &[Vec<u8>]) -> String {
     v.join("\n")
 }
 
-// Editor text -> pages: title page first, then the body in chunks of ROWS lines.
-fn to_pages(title: &str, body: &str) -> Result<sign::Pages, String> {
-    let rows = |t: &str| -> Result<Vec<Vec<u8>>, String> {
+// Editor text (UTF-8) -> Windows-1250 bytes. A character the code page lacks becomes '?' (counted in
+// `replaced`); it is never an error. Zero-width characters are invisible, so they are just dropped.
+fn cp1250(l: &str, replaced: &mut usize) -> Vec<u8> {
+    l.chars()
+        .filter(|c| !matches!(c, '\u{200b}'..='\u{200d}' | '\u{feff}'))
+        .map(|c| {
+            let mut buf = [0u8; 4];
+            let (b, _, bad) = WINDOWS_1250.encode(c.encode_utf8(&mut buf));
+            if bad {
+                *replaced += 1;
+                b'?'
+            } else {
+                b[0]
+            }
+        })
+        .collect()
+}
+
+// Editor text -> pages (title page first, then the body in chunks of ROWS lines) as Windows-1250,
+// plus how many characters had to be replaced. Used by both save and send.
+fn to_pages(title: &str, body: &str) -> Result<(sign::Pages, usize), String> {
+    let mut replaced = 0;
+    let mut rows = |t: &str| -> Result<Vec<Vec<u8>>, String> {
         t.lines()
             .map(|l| {
-                let (b, _, bad) = WINDOWS_1250.encode(l);
-                if bad || b.len() > COLS {
-                    Err(format!(
-                        "Nieprawidłowa linia (znak spoza Windows-1250?): {l}"
-                    ))
+                let b = cp1250(l, &mut replaced);
+                if b.len() > COLS {
+                    Err(format!("Linia ma więcej niż {COLS} znaków: {l}"))
                 } else {
-                    Ok(b.into_owned())
+                    Ok(b)
                 }
             })
             .collect()
@@ -345,7 +472,7 @@ fn to_pages(title: &str, body: &str) -> Result<sign::Pages, String> {
     if pages.len() > 128 {
         return Err("Za dużo stron (max 127)".into());
     }
-    Ok(pages)
+    Ok((pages, replaced))
 }
 
 fn main() {
@@ -355,7 +482,7 @@ fn main() {
 
     let mut win = window::Window::default()
         .with_size(960, 728)
-        .with_label("Notatnik");
+        .with_label("Tablica");
     win.set_border(false);
     win.size_range(960, 728, 0, 0); // resizable by the window manager (needed for maximize)
 
@@ -385,22 +512,12 @@ fn main() {
         }
     });
 
-    let mut min = btn!("min", 836, 12);
-    let mut max = btn!("max", 882, 12);
+    // window buttons (the PNGs are baked onto bg.png at exactly these positions)
+    let mut min = btn!("min", 882, 12);
     let mut close = btn!("close", 928, 12);
     min.set_callback({
         let mut w = win.clone();
         move |_| w.iconize()
-    });
-    max.set_callback({
-        let mut w = win.clone();
-        move |_| {
-            if w.maximize_active() {
-                w.un_maximize()
-            } else {
-                w.maximize()
-            }
-        }
     });
     close.set_callback(|_| app::quit());
 
@@ -414,28 +531,29 @@ fn main() {
     let mut num = NumInput::new(229, 56, 0, 999, false);
     num.set_value(1);
     let pgs = NumInput::new(297, 56, 0, 127, true); // 0 = auto
-    btn!("ustaw", 746, 82);
-    btn!("opcje", 814, 82);
+    btn!("ustaw", 814, 82);
     let mut info = btn!("info", 882, 82);
-    // Groups left to right, 32px gutters, a 2px separator centred in each gutter between groups:
-    // files (64px) | align (36px, 4px apart) | invisibles (36px) | settings (64px)
+    // Groups left to right: files (64px) | horizontal align (36px each, 4px apart) |
+    // vertical align (top / centred) | invisibles | settings. The groups after the files use
+    // 12px gutters around a 2px separator because the toolbar is tight.
     let (mut left, mut center, mut right, mut just) = (
         btn!("lewo", 421, 100),
         btn!("srodek", 461, 100),
         btn!("prawo", 501, 100),
         btn!("justuj", 541, 100),
     );
-    let mut marks = btn!("znaki", 643, 100);
+    let (mut vtop, mut vmid) = (btn!("pion_gora", 603, 100), btn!("pion_srodek", 643, 100));
+    let mut marks = btn!("znaki", 705, 100);
     let sp = png("sep", include_bytes!("../tex/sep.png"));
-    for x in [387, 609, 712] {
+    for x in [387, 589, 691, 765] {
         sep(&sp, x, 118);
     }
-    info.set_callback(|_| message_default("Notatnik – prosty edytor tekstu"));
+    info.set_callback(|_| message_default("Tablica świetlna 8x20"));
 
     let show = Rc::new(Cell::new(false));
 
     // left panel: title page
-    let kw1 = lbl("K: 1   W: 1", 330, 183, 120, 34, 14);
+    let kw1 = lbl("K: 1   W: 1", 290, 183, 120, 34, 14);
     let (mut title_ed, mut title_buf) = editor(36, 227, 1, 8, show.clone(), false);
     rules(&mut title_ed, &title_buf, Some(ROWS), kw1, None);
     title_buf.set_text(&default_title());
@@ -448,18 +566,41 @@ fn main() {
     rules(&mut ed, &buf, None, kw2, Some(page));
 
     // status bar
-    let com = lbl("COM-", 70, 676, 80, 24, 16);
-    let msg = lbl("", 170, 676, 540, 24, 13);
+    let mut com = lbl("COM-", 60, 676, 100, 24, 16);
+    com.set_label_color(Color::from_hex(0xEED590));
+    let msg = lbl("", 170, 676, 530, 24, 13); // ends before the status dot
+    // connection status dot, left of the port dropdown: green after a successful read/write,
+    // red after a failure and whenever another port is picked
+    let (dot_on, dot_off) = (
+        png("status_dot_on", include_bytes!("../tex/status_dot_on.png")),
+        png(
+            "status_dot_off",
+            include_bytes!("../tex/status_dot_off.png"),
+        ),
+    );
+    let mut dot = Frame::new(709, 679, 15, 15, None);
+    dot.set_image(Some(dot_off.clone()));
+    let set_dot: Rc<dyn Fn(bool)> = Rc::new(move |ok| {
+        let mut d = dot.clone();
+        d.set_image(Some(if ok { dot_on.clone() } else { dot_off.clone() }));
+        d.redraw();
+    });
+    let mut names = sign::ports();
+    names.sort_by(|a, b| natural_cmp(a, b).then_with(|| a.cmp(b)));
+    let ports = Rc::new(names);
     let mut port = menu::Choice::new(730, 674, 210, 26, None);
     port.add_choice("Port szeregowy niewybrany");
-    for name in sign::ports() {
-        port.add_choice(&name);
+    for name in ports.iter() {
+        port.add_choice(&name.replace('/', "\\/")); // a bare '/' would start a submenu
     }
     port.set_value(0);
     port.set_text_size(13);
     port.set_callback({
-        let mut com = com.clone();
-        move |p| com.set_label(&port_of(p).unwrap_or_else(|| "COM-".into()))
+        let (mut com, set_dot, ports) = (com.clone(), set_dot.clone(), ports.clone());
+        move |p| {
+            com.set_label(&port_of(p, &ports).unwrap_or_else(|| "COM-".into()));
+            set_dot(false);
+        }
     });
 
     root.end();
@@ -490,6 +631,23 @@ fn main() {
         let go = go.clone();
         btn.set_callback(move |_| go(a));
     }
+    // vertical alignment: the current page, or every page the selection touches
+    let vgo: Rc<dyn Fn(bool)> = Rc::new({
+        let (te, tb, e, b) = (title_ed.clone(), title_buf.clone(), ed.clone(), buf.clone());
+        move |mid| {
+            let title = app::focus().is_some_and(|f| f.is_same(&te));
+            let (mut e, mut b) = if title {
+                (te.clone(), tb.clone())
+            } else {
+                (e.clone(), b.clone())
+            };
+            valign(&mut e, &mut b, mid);
+        }
+    });
+    for (btn, mid) in [(&mut vtop, false), (&mut vmid, true)] {
+        let vgo = vgo.clone();
+        btn.set_callback(move |_| vgo(mid));
+    }
     marks.set_callback({
         let (show, mut te, mut e) = (show.clone(), title_ed.clone(), ed.clone());
         move |_| {
@@ -504,13 +662,26 @@ fn main() {
     new.set_callback({
         let (mut b, mut tb, path) = (buf.clone(), title_buf.clone(), path.clone());
         move |_| {
+            // a project that is empty (or still the untouched default) is replaced without asking
+            let dirty = !b.text().is_empty() || tb.text() != default_title();
+            if dirty
+                && choice2_default(
+                    "Bieżący tekst zostanie usunięty. Utworzyć nowy?",
+                    "Nie",
+                    "Tak",
+                    "",
+                ) != Some(1)
+            {
+                return;
+            }
             b.set_text("");
             tb.set_text(&default_title());
             *path.borrow_mut() = None;
         }
     });
     open.set_callback({
-        let (mut b, mut tb, path) = (buf.clone(), title_buf.clone(), path.clone());
+        let (mut b, mut tb, path, mut msg) =
+            (buf.clone(), title_buf.clone(), path.clone(), msg.clone());
         move |_| {
             let mut d = NativeFileChooser::new(NativeFileChooserType::BrowseFile);
             d.show();
@@ -520,24 +691,33 @@ fn main() {
             }
             match fs::read(&f)
                 .map_err(|e| e.to_string())
-                .and_then(|t| parse(&t))
+                .and_then(|t| load(&t))
             {
-                Ok(pages) => {
-                    tb.set_text(&decode(&pages[0]));
-                    b.set_text(&body_text(&pages[1..]));
+                Ok(l) => {
+                    tb.set_text(&l.title);
+                    b.set_text(&l.body);
                     *path.borrow_mut() = Some(f);
+                    msg.set_label(&if l.soft + l.hard > 0 {
+                        format!(
+                            "Otwarto; zawinięto linie: miękko {}, twardo {}",
+                            l.soft, l.hard
+                        )
+                    } else {
+                        "Otwarto".to_string()
+                    });
                 }
                 Err(e) => alert_default(&format!("Nie można otworzyć: {e}")),
             }
         }
     });
     save.set_callback({
-        let (b, tb, path) = (buf.clone(), title_buf.clone(), path.clone());
+        let (b, tb, path, mut msg) = (buf.clone(), title_buf.clone(), path.clone(), msg.clone());
         move |_| {
-            let bytes = match to_pages(&tb.text(), &b.text()) {
-                Ok(p) => file_bytes(&p),
+            let (pages, rep) = match to_pages(&tb.text(), &b.text()) {
+                Ok(r) => r,
                 Err(e) => return alert_default(&format!("Nie można zapisać: {e}")),
             };
+            let bytes = file_bytes(&pages);
             if path.borrow().is_none() {
                 let mut d = NativeFileChooser::new(NativeFileChooserType::BrowseSaveFile);
                 d.set_option(NativeFileChooserOptions::SaveAsConfirm);
@@ -549,8 +729,13 @@ fn main() {
                 *path.borrow_mut() = Some(f);
             }
             let p = path.borrow().clone().unwrap();
-            if let Err(e) = fs::write(&p, bytes) {
-                alert_default(&format!("Nie można zapisać: {e}"));
+            match fs::write(&p, bytes) {
+                Ok(()) => msg.set_label(&if rep > 0 {
+                    format!("Zapisano (Windows-1250); zamieniono znaki: {rep}")
+                } else {
+                    "Zapisano".to_string()
+                }),
+                Err(e) => alert_default(&format!("Nie można zapisać: {e}")),
             }
         }
     });
@@ -571,32 +756,41 @@ fn main() {
     // projector read / write (slow serial I/O runs on a worker thread)
     let busy = Rc::new(Cell::new(false));
     get.set_callback({
-        let (port, num, pgs, mut msg, buf, tbuf, busy) = (
+        let (port, ports, num, pgs, mut msg, buf, tbuf, busy, set_dot) = (
             port.clone(),
+            ports.clone(),
             num.clone(),
             pgs.clone(),
             msg.clone(),
             buf.clone(),
             title_buf.clone(),
             busy.clone(),
+            set_dot.clone(),
         );
         move |_| {
             if busy.get() {
                 return;
             }
-            let Some(name) = port_of(&port) else {
+            let Some(name) = port_of(&port, &ports) else {
+                set_dot(false);
                 msg.set_label("Wybierz port szeregowy");
                 return;
             };
             let (n, k) = (num.value() as u16, pgs.value() as u8);
             busy.set(true);
             msg.set_label("Odczyt z tablicy...");
-            let (mut buf, mut tbuf, mut msg, busy) =
-                (buf.clone(), tbuf.clone(), msg.clone(), busy.clone());
+            let (mut buf, mut tbuf, mut msg, busy, set_dot) = (
+                buf.clone(),
+                tbuf.clone(),
+                msg.clone(),
+                busy.clone(),
+                set_dot.clone(),
+            );
             bg(
                 move || sign::read(&name, n, k).map_err(|e| e.to_string()),
                 move |r| {
                     busy.set(false);
+                    set_dot(r.is_ok());
                     match r {
                         Ok(pages) => {
                             tbuf.set_text(&decode(&pages[0]));
@@ -610,40 +804,49 @@ fn main() {
         }
     });
     put_sign.set_callback({
-        let (port, num, pgs, mut msg, buf, tbuf, busy) = (
+        let (port, ports, num, pgs, mut msg, buf, tbuf, busy, set_dot) = (
             port.clone(),
+            ports.clone(),
             num.clone(),
             pgs.clone(),
             msg.clone(),
             buf.clone(),
             title_buf.clone(),
             busy.clone(),
+            set_dot.clone(),
         );
         move |_| {
             if busy.get() {
                 return;
             }
-            let Some(name) = port_of(&port) else {
+            let Some(name) = port_of(&port, &ports) else {
+                set_dot(false);
                 msg.set_label("Wybierz port szeregowy");
                 return;
             };
-            let pages = match to_pages(&tbuf.text(), &buf.text()) {
-                Ok(p) => p,
+            let (pages, rep) = match to_pages(&tbuf.text(), &buf.text()) {
+                Ok(r) => r,
                 Err(e) => return msg.set_label(&e),
             };
             let n = num.value() as u16;
             busy.set(true);
             msg.set_label("Zapis do tablicy...");
-            let (mut pgs, mut msg, busy) = (pgs.clone(), msg.clone(), busy.clone());
+            let (mut pgs, mut msg, busy, set_dot) =
+                (pgs.clone(), msg.clone(), busy.clone(), set_dot.clone());
             let count = pages.len() - 1;
             bg(
                 move || sign::write(&name, n, &pages).map_err(|e| e.to_string()),
                 move |r| {
                     busy.set(false);
+                    set_dot(r.is_ok());
                     match r {
                         Ok(()) => {
                             pgs.set_value(count as u32);
-                            msg.set_label("Zapisano w tablicy");
+                            msg.set_label(&if rep > 0 {
+                                format!("Zapisano w tablicy; zamieniono znaki: {rep}")
+                            } else {
+                                "Zapisano w tablicy".to_string()
+                            });
                         }
                         Err(e) => msg.set_label(&format!("Błąd zapisu: {e}")),
                     }
@@ -665,15 +868,47 @@ mod tests {
             .map(|i| format!("linia {i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let pages = to_pages("TYTUŁ", &body).unwrap();
+        let (pages, rep) = to_pages("TYTUŁ", &body).unwrap();
+        assert_eq!(rep, 0);
         assert_eq!(pages.len(), 3); // meta + 2 body pages
         let bytes = file_bytes(&pages);
         let lines: Vec<&[u8]> = bytes.split(|&b| b == b'\n').collect();
         assert_eq!(lines.len(), 3 * 11 + 1); // 3 header lines + 8 rows per page, + trailing empty
         assert!(lines.iter().all(|l| l.len() <= COLS + 1)); // + '\r'
-        let back = parse(&bytes).unwrap();
-        assert_eq!(decode(&back[0]), "TYTUŁ");
-        assert_eq!(body_text(&back[1..]), body);
-        assert!(parse(b"123456789012345678901").is_err()); // 21 chars
+        let back = load(&bytes).unwrap();
+        assert_eq!(back.title, "TYTUŁ");
+        assert_eq!(back.body, body);
+        assert_eq!((back.soft, back.hard), (0, 0));
+    }
+
+    #[test]
+    fn loads_without_decoration() {
+        let l = load(b"abc\r\ndef\r\n").unwrap();
+        assert_eq!(l.body, "abc\ndef");
+        assert_eq!(l.title, default_title());
+        // header lines without DECO, and a stray DECO line
+        let l = load(b"T\n<- Strona nr: 001 ->\nx\n<------------------>\n<- Strona nr: 002 ->\ny")
+            .unwrap();
+        assert_eq!(l.title, "T");
+        assert_eq!(l.body, format!("x{}y", "\n".repeat(8)));
+    }
+
+    #[test]
+    fn long_lines_are_wrapped() {
+        let l = load(b"aaaa bbbb cccc dddd eeee").unwrap();
+        assert_eq!(
+            (l.body.as_str(), l.soft, l.hard),
+            ("aaaa bbbb cccc dddd\neeee", 1, 0)
+        );
+        let l = load(b"123456789012345678901").unwrap();
+        assert_eq!(
+            (l.body.as_str(), l.soft, l.hard),
+            ("12345678901234567890\n1", 0, 1)
+        );
+        let l = load("zażółć gęślą jaźń zażółć".as_bytes()).unwrap(); // UTF-8 input
+        assert!(l.body.lines().all(|x| x.chars().count() <= COLS));
+        let l =
+            load(b"\xbf\xf3\xb3w \xbf\xf3\xb3w \xbf\xf3\xb3w \xbf\xf3\xb3w \xbf\xf3\xb3w").unwrap(); // cp1250
+        assert!(l.body.contains("żółw"));
     }
 }

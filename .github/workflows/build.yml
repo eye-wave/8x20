@@ -1,0 +1,84 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false # one broken target must not hide the others
+      matrix:
+        include:
+          - {
+              name: windows-10-64,
+              os: windows-latest,
+              target: x86_64-pc-windows-msvc,
+            }
+          - {
+              name: windows-7-64,
+              os: windows-latest,
+              target: x86_64-win7-windows-msvc,
+            }
+          - {
+              name: windows-7-32,
+              os: windows-latest,
+              target: i686-win7-windows-msvc,
+            }
+          - {
+              name: linux-64,
+              os: ubuntu-22.04,
+              target: x86_64-unknown-linux-gnu,
+            }
+          - {
+              name: linux-32,
+              os: ubuntu-22.04,
+              target: i686-unknown-linux-gnu,
+              multilib: true,
+            }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Linux 64 deps
+        if: matrix.os == 'ubuntu-22.04' && !matrix.multilib
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libx11-dev libxext-dev libxft-dev libxinerama-dev \
+            libxcursor-dev libxrender-dev libxfixes-dev libpango1.0-dev libgl1-mesa-dev libglu1-mesa-dev libudev-dev
+
+      - name: Linux 32 deps
+        if: matrix.multilib
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config gcc-multilib g++-multilib libx11-dev:i386 libxext-dev:i386 \
+            libxft-dev:i386 libxinerama-dev:i386 libxcursor-dev:i386 libxrender-dev:i386 libxfixes-dev:i386 \
+            libpango1.0-dev:i386 libgl1-mesa-dev:i386 libglu1-mesa-dev:i386 libudev-dev:i386
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Test (native targets only)
+        if: matrix.name == 'windows-10-64' || matrix.name == 'linux-64'
+        run: cargo test --release
+
+      - name: Build
+        run: cargo --config .cargo/size.toml build --release --target ${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tugal-${{ matrix.name }}
+          path: |
+            target/${{ matrix.target }}/release/tugal
+            target/${{ matrix.target }}/release/tugal.exe
+          if-no-files-found: error

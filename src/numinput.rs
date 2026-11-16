@@ -10,11 +10,13 @@ pub struct NumInput {
     auto: bool,
 }
 
+const AUTO: &str = "Auto";
+
 // Normalize whatever is in the box: empty / "auto" / too small -> min, too big -> max.
 fn fix(i: &mut Input, min: u32, max: u32, auto: bool) {
     let n = i.value().parse::<u32>().unwrap_or(min).clamp(min, max);
     let s = if auto && n == 0 {
-        "auto".into()
+        AUTO.into()
     } else {
         n.to_string()
     };
@@ -40,7 +42,7 @@ impl NumInput {
         });
         i.handle(move |i, ev| {
             match ev {
-                Event::Push | Event::Focus if auto && i.value() == "auto" => i.set_value(""),
+                Event::Push | Event::Focus if auto && i.value() == AUTO => i.set_value(""),
                 Event::Unfocus => fix(i, min, max, auto),
                 _ => {}
             }

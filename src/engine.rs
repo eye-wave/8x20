@@ -70,7 +70,7 @@ pub fn align_line(l: &str, a: Al) -> String {
     let room = COLS.saturating_sub(t.chars().count());
     match a {
         Al::Left => t,
-        Al::Center => format!("{}{t}", " ".repeat(room / 2)),
+        Al::Center => format!("{}{t}", " ".repeat(center_pad(&t))),
         Al::Right => format!("{}{t}", " ".repeat(room)),
         Al::Justify => {
             if w.len() < 2 {
@@ -88,6 +88,25 @@ pub fn align_line(l: &str, a: Al) -> String {
             out
         }
     }
+}
+
+// Punctuation that hangs when centering: opening marks at the start of a line and closing marks at
+// its end don't count towards the line's width, so the words themselves look centered.
+const OPEN: &str = "(\"'„“‘‚«[{¡¿";
+const CLOSE: &str = ".,;:!?…)]}\"'”’»";
+
+// Leading spaces that center a line by its words; hanging marks may reach into the margins but the
+// line never grows past COLS. A line with nothing but punctuation is centered as is.
+fn center_pad(t: &str) -> usize {
+    let c: Vec<char> = t.chars().collect();
+    let ld = c.iter().take_while(|x| OPEN.contains(**x)).count();
+    let tr = c.iter().rev().take_while(|x| CLOSE.contains(**x)).count();
+    let core = c.len().saturating_sub(ld + tr);
+    if core == 0 {
+        return COLS.saturating_sub(c.len()) / 2;
+    }
+    let spaces = (COLS.saturating_sub(core) / 2).saturating_sub(ld);
+    spaces.saturating_sub((spaces + c.len()).saturating_sub(COLS))
 }
 
 // After an edit: every whitespace-only line except the caret's own is cleared to a bare newline.
@@ -289,6 +308,66 @@ pub fn bad(b: &text::TextBuffer, pos: i32, ins: i32, max_lines: Option<i32>) -> 
     max_lines.is_some_and(|m| b.count_lines(0, b.length()) + 1 > m)
 }
 
+// Move a page's text block (first..last non-blank row) to the top or the vertical middle of ROWS
+// rows. Inner blank rows are kept; an odd spare row goes below. A blank page is returned as is.
+pub fn valign_page(rows: &[String], middle: bool) -> Vec<String> {
+    let r = ROWS as usize;
+    let used = |l: &String| !l.trim().is_empty();
+    let (Some(f), Some(l)) = (rows.iter().position(used), rows.iter().rposition(used)) else {
+        return rows.to_vec();
+    };
+    let mut v = vec![String::new(); if middle { (r - (l - f + 1)) / 2 } else { 0 }];
+    v.extend_from_slice(&rows[f..=l]);
+    v.resize(r, String::new());
+    v
+}
+
+// Vertical alignment: with a selection, every page from the first to the last one it touches;
+// with none, the page the caret is on. Pages stay exactly ROWS rows (so page boundaries don't
+// shift); only the buffer's final page loses its trailing blank rows, as decode() does.
+pub fn valign(e: &mut text::TextEditor, b: &mut text::TextBuffer, middle: bool) {
+    let r = ROWS as usize;
+    let rows: Vec<String> = b.text().split('\n').map(String::from).collect();
+    let n = rows.len();
+    let (s, z) = match b.selection_position().filter(|(s, z)| s != z) {
+        Some((s, z)) => {
+            let (s, z) = (s.min(z), s.max(z));
+            (s, if b.line_start(z) == z { z - 1 } else { z }) // selection ending at a line start
+        }
+        None => (e.insert_position(), e.insert_position()),
+    };
+    let last = (n - 1) / r;
+    let p0 = (b.count_lines(0, s) as usize / r).min(last);
+    let p1 = (b.count_lines(0, z) as usize / r).clamp(p0, last);
+    let mut out: Vec<String> = (p0..=p1)
+        .flat_map(|k| {
+            let page: Vec<String> = (0..r)
+                .map(|i| rows.get(k * r + i).cloned().unwrap_or_default())
+                .collect();
+            valign_page(&page, middle)
+        })
+        .collect();
+    let ls = line_pos(b, (p0 * r) as i32);
+    let le = if (p1 + 1) * r < n {
+        line_pos(b, ((p1 + 1) * r) as i32) - 1
+    } else {
+        let keep = (p1 - p0) * r + 1; // last page: drop its trailing blanks, never earlier padding
+        while out.len() > keep && out.last().is_some_and(|l| l.is_empty()) {
+            out.pop();
+        }
+        b.length()
+    };
+    let new = out.join("\n");
+    // caret at the end of the last text row
+    let k = out.iter().rposition(|l| !l.is_empty()).map_or(0, |k| {
+        out[..=k].iter().map(|l| l.len() + 1).sum::<usize>() - 1
+    });
+    b.replace(ls, le, &new);
+    b.unselect();
+    e.set_insert_position(ls + k as i32);
+    e.show_insert_position();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,5 +403,47 @@ mod tests {
         assert!(matches!(infer("ab cd"), Al::Left));
         let j = align_line(&format!("{}abcdef", sp(5)), infer(&format!("{}ab", sp(9))));
         assert_eq!(j, format!("{}abcdef", sp(7)));
+    }
+
+    #[test]
+    fn vertical() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let page = v(&["", "a", "", "b", "", "", "", ""]);
+        assert_eq!(
+            valign_page(&page, true),
+            v(&["", "", "a", "", "b", "", "", ""])
+        );
+        assert_eq!(
+            valign_page(&page, false),
+            v(&["a", "", "b", "", "", "", "", ""])
+        );
+        assert_eq!(valign_page(&v(&[""; 8]), true), v(&[""; 8]));
+    }
+
+    #[test]
+    fn center_ignores_punctuation() {
+        let sp = |n| " ".repeat(n);
+        assert_eq!(
+            align_line("abcdef.", Al::Center),
+            format!("{}abcdef.", sp(7))
+        );
+        assert_eq!(align_line("abcdef", Al::Center), format!("{}abcdef", sp(7)));
+        assert_eq!(
+            align_line("\"abcdef\"", Al::Center),
+            format!("{}\"abcdef\"", sp(6))
+        );
+        assert_eq!(
+            align_line("abcdef!?", Al::Center),
+            format!("{}abcdef!?", sp(7))
+        );
+        assert_eq!(align_line("...", Al::Center), format!("{}...", sp(8)));
+        assert_eq!(
+            align_line("abcdefghijklmnopqrs.", Al::Center),
+            "abcdefghijklmnopqrs."
+        );
+        assert_eq!(
+            align_line("abcdef.", Al::Right),
+            format!("{}abcdef.", sp(13))
+        );
     }
 }

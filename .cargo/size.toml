@@ -1,0 +1,12 @@
+[unstable]
+build-std = ["std", "panic_abort"]
+build-std-features = ["optimize_for_size"]
+
+[build]
+rustflags = [
+    "-Zthreads=8",
+    "-Zlocation-detail=none",
+    "-Zfmt-debug=none",
+    "-Zunstable-options",
+    "-Cpanic=immediate-abort",
+]

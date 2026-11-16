@@ -1,9 +1,15 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 use encoding_rs::WINDOWS_1250;
-use fltk::{dialog::*, enums::*, frame::Frame, misc::Spinner, prelude::*, *};
+use fltk::{dialog::*, enums::*, frame::Frame, prelude::*, *};
 use std::{cell::Cell, cell::RefCell, fs, path::PathBuf, rc::Rc, sync::mpsc};
 
+mod engine;
+mod numinput;
 mod sign;
+
+use numinput::NumInput;
+
+use engine::{Al, COLS, ROWS, align, align_line, bad, kill, put, rejoin, tidy};
 
 fn png(name: &str, d: &[u8]) -> image::PngImage {
     image::PngImage::from_data(d).unwrap_or_else(|e| panic!("tex/{name}.png: {e}"))
@@ -52,6 +58,10 @@ fn sep(img: &image::PngImage, x: i32, cy: i32) {
     f.set_image(Some(img.clone()));
 }
 
+fn default_title() -> String {
+    align_line("TEKST NR ???", Al::Center)
+}
+
 fn lbl(text: &str, x: i32, y: i32, w: i32, h: i32, size: i32) -> Frame {
     let mut f = Frame::new(x, y, w, h, None);
     f.set_label(text);
@@ -60,15 +70,6 @@ fn lbl(text: &str, x: i32, y: i32, w: i32, h: i32, size: i32) -> Frame {
     f
 }
 
-fn spin(x: i32, y: i32, val: f64) -> Spinner {
-    let mut s = Spinner::new(x, y, 52, 24, None);
-    s.set_range(0.0, 999.0);
-    s.set_value(val);
-    s
-}
-
-const COLS: usize = 20; // max characters per line
-const ROWS: i32 = 8; // lines per page
 const FONT: Font = Font::Courier; // monospace
 const SIZE: i32 = 30;
 
@@ -80,6 +81,7 @@ fn editor(
     bar: i32,
     slack: i32,
     show: Rc<Cell<bool>>,
+    pages: bool, // draw page separators
 ) -> (text::TextEditor, text::TextBuffer) {
     draw::set_font(FONT, SIZE);
     let w = COLS as i32 * draw::width("M").round() as i32 + 6 + bar;
@@ -94,142 +96,57 @@ fn editor(
     ed.set_scrollbar_align(Align::Right); // vertical bar only: fltk shows the horizontal one only if TOP/BOTTOM is set
     // Tab: not handled by the editor, so fltk moves focus to the next widget instead of inserting.
     ed.add_key_binding(Key::Tab, Shortcut::None, |_, _| 0);
-    // Invisible characters: fltk can't show them, so paint · / ¶ over the visible range after the base draw.
+    // Ctrl+Backspace / Ctrl+Delete: delete a word (fltk's default treats them as plain Backspace/Delete).
+    // fltk wants plain fn pointers here, so rebuild the editor from the raw pointer (never dropped).
+    ed.add_key_binding(Key::BackSpace, Shortcut::Ctrl, |_, p| {
+        let mut e =
+            std::mem::ManuallyDrop::new(unsafe { text::TextEditor::from_widget_ptr(p as _) });
+        kill(&mut e, true)
+    });
+    ed.add_key_binding(Key::Delete, Shortcut::Ctrl, |_, p| {
+        let mut e =
+            std::mem::ManuallyDrop::new(unsafe { text::TextEditor::from_widget_ptr(p as _) });
+        kill(&mut e, false)
+    });
+    // Overlay after the base draw: a line above every page's first row, and (optionally) · / ¶ for
+    // invisible characters, which fltk can't show.
     ed.super_draw_first(true);
     ed.draw(move |e| {
-        let Some(b) = e.buffer().filter(|_| show.get()) else {
+        let Some(b) = e.buffer() else {
             return;
         };
-        let (from, to) = (
-            e.xy_to_position(e.x(), e.y(), text::PositionType::Cursor),
-            e.xy_to_position(e.x() + e.w(), e.y() + e.h(), text::PositionType::Cursor),
-        );
+        let from = e.xy_to_position(e.x(), e.y(), text::PositionType::Cursor);
         draw::push_clip(e.x(), e.y(), e.w(), e.h());
         draw::set_font(FONT, SIZE);
-        draw::set_draw_color(Color::from_rgb(160, 160, 160));
         let (cw, lh) = (draw::width("M").round() as i32, draw::height());
-        for (i, ch) in b.text().char_indices() {
-            let i = i as i32;
-            let g = match ch {
-                _ if i < from || i > to => continue,
-                ' ' => "·",
-                '\n' => "¶",
-                _ => continue,
-            };
-            let (px, py) = e.position_to_xy(i);
-            draw::draw_text2(g, px, py, cw, lh, Align::Center);
+        let (n0, y0) = (
+            b.count_lines(0, from),
+            e.position_to_xy(b.line_start(from)).1,
+        );
+        draw::set_draw_color(Color::from_rgb(120, 120, 120));
+        for r in 0..=e.h() / lh + 1 {
+            if pages && (n0 + r) % ROWS == 0 && n0 + r > 0 {
+                draw::draw_line(e.x(), y0 + r * lh, e.x() + e.w() - 12, y0 + r * lh);
+            }
+        }
+        if show.get() {
+            let to = e.xy_to_position(e.x() + e.w(), e.y() + e.h(), text::PositionType::Cursor);
+            draw::set_draw_color(Color::from_rgb(160, 160, 160));
+            for (i, ch) in b.text().char_indices() {
+                let i = i as i32;
+                let g = match ch {
+                    _ if i < from || i > to => continue,
+                    ' ' => "·",
+                    '\n' => "¶",
+                    _ => continue,
+                };
+                let (px, py) = e.position_to_xy(i);
+                draw::draw_text2(g, px, py, cw, lh, Align::Center);
+            }
         }
         draw::pop_clip();
     });
     (ed, buf)
-}
-
-#[derive(Clone, Copy)]
-enum Al {
-    Left,
-    Center,
-    Right,
-    Justify,
-}
-
-// Plain text has no alignment attribute, so alignment is real padding: a line's leading/trailing
-// spaces are layout, never content, and are recomputed here. Every mode first normalizes inner space
-// runs to one space (otherwise a justified line could never be left/centered/right-aligned again).
-fn align_line(l: &str, a: Al) -> String {
-    let w: Vec<&str> = l.split(' ').filter(|s| !s.is_empty()).collect();
-    let t = w.join(" ");
-    let room = COLS.saturating_sub(t.chars().count());
-    match a {
-        Al::Left => t,
-        Al::Center => format!("{}{t}", " ".repeat(room / 2)),
-        Al::Right => format!("{}{t}", " ".repeat(room)),
-        Al::Justify => {
-            if w.len() < 2 {
-                return t;
-            }
-            let gaps = w.len() - 1;
-            let sp = COLS.saturating_sub(w.iter().map(|s| s.chars().count()).sum());
-            let mut out = String::new();
-            for (i, s) in w.iter().enumerate() {
-                out += s;
-                if i < gaps {
-                    out += &" ".repeat(sp / gaps + (i < sp % gaps) as usize);
-                }
-            }
-            out
-        }
-    }
-}
-
-// Align the selected lines (or the caret's line).
-fn align(e: &mut text::TextEditor, b: &mut text::TextBuffer, a: Al) {
-    let p = e.insert_position();
-    let (s, z) = b
-        .selection_position()
-        .filter(|(s, z)| s != z)
-        .unwrap_or((p, p));
-    let (s, z) = (s.min(z), s.max(z));
-    let z = if z > s && b.line_start(z) == z {
-        z - 1
-    } else {
-        z
-    }; // selection ending at a line start
-    let (ls, le) = (b.line_start(s), b.line_end(z));
-    let new = b
-        .text_range(ls, le)
-        .unwrap_or_default()
-        .split('\n')
-        .map(|l| align_line(l, a))
-        .collect::<Vec<_>>()
-        .join("\n");
-    b.replace(ls, le, &new);
-    b.unselect();
-    e.set_insert_position(ls + new.len() as i32);
-    e.show_insert_position();
-}
-
-// Insert text at the caret, enforcing COLS per line and (optionally) a max line count.
-// Typing is blocked at the limit; pasting hard-wraps at the limit instead.
-fn put(
-    e: &mut text::TextEditor,
-    b: &mut text::TextBuffer,
-    s: &str,
-    max_lines: Option<i32>,
-    wrap: bool,
-) {
-    if let Some((a, z)) = b.selection_position() {
-        if a != z {
-            b.remove(a, z);
-            e.set_insert_position(a);
-        }
-        b.unselect();
-    }
-    let mut pos = e.insert_position();
-    for ch in s.chars() {
-        let ch = if ch == '\t' { ' ' } else { ch };
-        if ch == '\r' || (ch != '\n' && ch.is_control()) {
-            continue;
-        }
-        let (ls, le) = (b.line_start(pos), b.line_end(pos));
-        let len = b.text_range(ls, le).unwrap_or_default().chars().count();
-        let room = max_lines.is_none_or(|m| b.count_lines(0, b.length()) + 1 < m);
-        let out = if ch == '\n' {
-            if !room {
-                continue;
-            }
-            "\n".to_string()
-        } else if len < COLS {
-            ch.to_string()
-        } else if wrap && pos == le && room && ch != ' ' {
-            format!("\n{ch}")
-        } else {
-            continue;
-        };
-        b.insert(pos, &out);
-        pos += out.len() as i32;
-    }
-    e.set_insert_position(pos);
-    e.show_insert_position();
 }
 
 const DECO: &[u8] = b"<------------------>";
@@ -303,22 +220,6 @@ fn body_text(pages: &[Vec<Vec<u8>>]) -> String {
     decode(&padded)
 }
 
-// True if the text just inserted at pos..pos+ins left any line over COLS or too many lines.
-fn bad(b: &text::TextBuffer, pos: i32, ins: i32, max_lines: Option<i32>) -> bool {
-    let (mut p, end) = (b.line_start(pos), b.line_end((pos + ins).min(b.length())));
-    loop {
-        let le = b.line_end(p);
-        if b.text_range(p, le).unwrap_or_default().chars().count() > COLS {
-            return true;
-        }
-        if le >= end || le >= b.length() {
-            break;
-        }
-        p = le + 1;
-    }
-    max_lines.is_some_and(|m| b.count_lines(0, b.length()) + 1 > m)
-}
-
 // Enforces the line rules on the buffer itself (so it works however fltk orders its key handling):
 // any edit that breaks them is taken back on the next loop tick; pastes are re-inserted hard-wrapped.
 // Also keeps K (column) / W (row) and the page label fresh.
@@ -332,8 +233,11 @@ fn rules(
     let mut watch = buf.clone();
     watch.add_modify_callback({
         let (b, e) = (buf.clone(), ed.clone());
-        move |pos, ins, _del, _r, _t| {
-            if ins > 0 && bad(&b, pos, ins, max_lines) {
+        move |pos, ins, del, _r, t| {
+            if ins == 0 && t == "\n" {
+                let (mut b, mut e) = (b.clone(), e.clone());
+                app::add_timeout3(0.0, move |_| rejoin(&mut e, &mut b, pos));
+            } else if ins > 0 && bad(&b, pos, ins, max_lines) {
                 let (mut b, mut e) = (b.clone(), e.clone());
                 app::add_timeout3(0.0, move |_| {
                     let txt = b
@@ -343,6 +247,10 @@ fn rules(
                     e.set_insert_position(pos);
                     put(&mut e, &mut b, &txt, max_lines, ins > 1);
                 });
+            }
+            if ins > 0 || del > 0 {
+                let (mut b, e) = (b.clone(), e.clone());
+                app::add_timeout3(0.0, move |_| tidy(&e, &mut b));
             }
         }
     });
@@ -502,8 +410,10 @@ fn main() {
     let mut save = btn!("zapisz", 155, 82);
     let mut get = btn!("odczytaj", 223, 82);
     let mut put_sign = btn!("wyslij", 291, 82);
-    let num = spin(725, 7, 1.0);
-    let pgs = spin(725, 35, 0.0);
+    // slot number above read, page count above write (centred over the 64px buttons)
+    let mut num = NumInput::new(229, 56, 0, 999, false);
+    num.set_value(1);
+    let pgs = NumInput::new(297, 56, 0, 127, true); // 0 = auto
     btn!("ustaw", 746, 82);
     btn!("opcje", 814, 82);
     let mut info = btn!("info", 882, 82);
@@ -526,14 +436,15 @@ fn main() {
 
     // left panel: title page
     let kw1 = lbl("K: 1   W: 1", 330, 183, 120, 34, 14);
-    let (mut title_ed, title_buf) = editor(36, 227, 1, 8, show.clone());
+    let (mut title_ed, mut title_buf) = editor(36, 227, 1, 8, show.clone(), false);
     rules(&mut title_ed, &title_buf, Some(ROWS), kw1, None);
+    title_buf.set_text(&default_title());
 
     // right panel: page
     let page = lbl("Strona - 001", 522, 183, 200, 34, 17);
     let kw2 = lbl("K: 1   W: 1", 740, 183, 120, 34, 14);
     let mut search = btn!("szukaj", 898, 186);
-    let (mut ed, buf) = editor(486, 227, 12, 48, show.clone());
+    let (mut ed, buf) = editor(486, 227, 12, 48, show.clone(), true);
     rules(&mut ed, &buf, None, kw2, Some(page));
 
     // status bar
@@ -555,6 +466,7 @@ fn main() {
     win.end();
     win.resize_callback(move |_, _, _, w, h| root.set_pos((w - 960) / 2, (h - 728) / 2));
     win.show();
+    let _ = ed.take_focus(); // start typing in the page editor
 
     // alignment acts on the focused editor (body if none); clicks don't steal focus (visible_focus is off)
     let go: Rc<dyn Fn(Al)> = Rc::new({
@@ -593,7 +505,7 @@ fn main() {
         let (mut b, mut tb, path) = (buf.clone(), title_buf.clone(), path.clone());
         move |_| {
             b.set_text("");
-            tb.set_text("");
+            tb.set_text(&default_title());
             *path.borrow_mut() = None;
         }
     });
@@ -730,7 +642,7 @@ fn main() {
                     busy.set(false);
                     match r {
                         Ok(()) => {
-                            pgs.set_value(count as f64);
+                            pgs.set_value(count as u32);
                             msg.set_label("Zapisano w tablicy");
                         }
                         Err(e) => msg.set_label(&format!("Błąd zapisu: {e}")),
@@ -746,23 +658,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn alignment() {
-        let sp = |n| " ".repeat(n);
-        assert_eq!(align_line("abcd", Al::Center), format!("{}abcd", sp(8)));
-        assert_eq!(align_line("  abcd  ", Al::Right), format!("{}abcd", sp(16)));
-        assert_eq!(align_line("  abcd  ", Al::Left), "abcd");
-        assert_eq!(align_line("ab cd", Al::Justify), format!("ab{}cd", sp(16)));
-        assert_eq!(
-            align_line(" a b c ", Al::Justify),
-            format!("a{}b{}c", sp(9), sp(8))
-        );
-        assert_eq!(align_line("word", Al::Justify), "word");
-        let j = align_line("ab cd", Al::Justify); // justified lines must be undoable
-        assert_eq!(align_line(&j, Al::Left), "ab cd");
-        assert_eq!(align_line(&j, Al::Center), format!("{}ab cd", sp(7)));
-    }
 
     #[test]
     fn file_roundtrip_keeps_page_shape() {

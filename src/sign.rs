@@ -112,21 +112,27 @@ fn open(name: &str) -> io::Result<Box<dyn SerialPort>> {
     Ok(p)
 }
 
+fn blank(pg: &[Vec<u8>]) -> bool {
+    pg.iter().flatten().all(|&c| c == b' ' || c == 0)
+}
+
 /// Slot N: title page via cmd 1 + N, then pages 1..=pages via cmd 3 + page number.
+/// pages == 0 (auto): read until 3 blank pages in a row or page 127, then drop trailing blank pages.
 pub fn read(port: &str, n: u16, pages: u8) -> io::Result<Pages> {
     let mut p = open(port)?;
-    (0..=pages)
-        .map(|k| {
-            page(
-                &mut *p,
-                &if k == 0 {
-                    frame(1, &n.to_be_bytes())
-                } else {
-                    frame(3, &[k])
-                },
-            )
-        })
-        .collect()
+    let mut out = vec![page(&mut *p, &frame(1, &n.to_be_bytes()))?];
+    for k in 1..=if pages == 0 { 127 } else { pages } {
+        out.push(page(&mut *p, &frame(3, &[k]))?);
+        if pages == 0 && out.len() > 3 && out.iter().rev().take(3).all(|pg| blank(pg)) {
+            break;
+        }
+    }
+    if pages == 0 {
+        while out.len() > 1 && blank(out.last().unwrap()) {
+            out.pop();
+        }
+    }
+    Ok(out)
 }
 
 /// Every page as cmd 4 [page index, 8x20 bytes padded to 256] waiting for ack, then cmd 2 [N] commits the slot.

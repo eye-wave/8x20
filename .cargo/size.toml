@@ -1,3 +1,4 @@
+
 [unstable]
 build-std = ["std", "panic_abort"]
 build-std-features = ["optimize_for_size"]
@@ -9,4 +10,16 @@ rustflags = [
     "-Zfmt-debug=none",
     "-Zunstable-options",
     "-Cpanic=immediate-abort",
+]
+
+# MSVC: link the CRT statically, so no vcruntime140.dll / ucrt install is needed (matters on Win7).
+# A target table replaces [build] rustflags instead of merging, so the flags are repeated here.
+[target.'cfg(target_env = "msvc")']
+rustflags = [
+    "-Zthreads=8",
+    "-Zlocation-detail=none",
+    "-Zfmt-debug=none",
+    "-Zunstable-options",
+    "-Cpanic=immediate-abort",
+    "-Ctarget-feature=+crt-static",
 ]

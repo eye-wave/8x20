@@ -477,13 +477,20 @@ fn to_pages(title: &str, body: &str) -> Result<(sign::Pages, usize), String> {
 
 fn main() {
     let app = app::App::default();
+    // the UI is a fixed 960x728; on a smaller screen scale it down to fit the work area
+    let (_, _, ww, wh) = app::screen_work_area(0);
+    let k = (ww as f32 / 960.0).min(wh as f32 / 728.0);
+    if k < 1.0 {
+        app::set_screen_scale(0, k);
+    }
     app::set_visible_focus(false);
     app::set_font_size(14);
 
     let mut win = window::Window::default()
         .with_size(960, 728)
-        .with_label("Tablica");
+        .with_label("Notatnik");
     win.set_border(false);
+    win.set_icon(Some(png("icon", include_bytes!("../tex/icon.png"))));
     win.size_range(960, 728, 0, 0); // resizable by the window manager (needed for maximize)
 
     // All content lives in one fixed-size group that is centered when the window grows.
@@ -548,7 +555,7 @@ fn main() {
     for x in [387, 589, 691, 765] {
         sep(&sp, x, 118);
     }
-    info.set_callback(|_| message_default("Tablica świetlna 8x20"));
+    info.set_callback(|_| message_default("Notatnik – prosty edytor tekstu"));
 
     let show = Rc::new(Cell::new(false));
 

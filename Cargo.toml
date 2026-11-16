@@ -3,13 +3,16 @@ cargo-features = ["profile-rustflags"]
 
 [package]
 name = "tablica"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [dependencies]
 encoding_rs = "0.8"
 fltk = "1.5"
 serialport = "4.10"
+
+[build-dependencies]
+winresource = "0.1"
 
 [profile.release]
 opt-level = "z"

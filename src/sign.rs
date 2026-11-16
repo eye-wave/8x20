@@ -4,13 +4,18 @@
 use serialport::{ClearBuffer, SerialPort};
 use std::{
     io::{self, ErrorKind},
-    sync::atomic::{AtomicBool, Ordering::Relaxed},
+    sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed},
     time::Duration,
 };
 
 // Set by the UI to abort the running transfer; checked before every send and in the rx loop.
 // one global flag (only one transfer runs at a time); reset when a transfer starts.
 static STOP: AtomicBool = AtomicBool::new(false);
+// Pages received so far by the running read (the UI polls it for the progress bar).
+static DONE: AtomicU32 = AtomicU32::new(0);
+pub fn done() -> u32 {
+    DONE.load(Relaxed)
+}
 pub fn cancel() {
     STOP.store(true, Relaxed);
 }
@@ -136,10 +141,13 @@ fn blank(pg: &[Vec<u8>]) -> bool {
 /// pages == 0 (auto): read until 3 blank pages in a row or page 127, then drop trailing blank pages.
 pub fn read(port: &str, n: u16, pages: u8) -> io::Result<Pages> {
     STOP.store(false, Relaxed);
+    DONE.store(0, Relaxed);
     let mut p = open(port)?;
     let mut out = vec![page(&mut *p, &frame(1, &n.to_be_bytes()))?];
+    DONE.store(1, Relaxed);
     for k in 1..=if pages == 0 { 127 } else { pages } {
         out.push(page(&mut *p, &frame(3, &[k]))?);
+        DONE.store(out.len() as u32, Relaxed);
         if pages == 0 && out.len() > 3 && out.iter().rev().take(3).all(|pg| blank(pg)) {
             break;
         }

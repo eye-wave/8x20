@@ -40,7 +40,11 @@ impl NumInput {
                 i.set_value(&s);
             }
         });
+        i.super_handle_first(false); // so drops reach our handler before FLTK pastes them
         i.handle(move |i, ev| {
+            if crate::dnd(ev) {
+                return true;
+            }
             match ev {
                 Event::Push | Event::Focus if auto && i.value() == AUTO => i.set_value(""),
                 Event::Unfocus => fix(i, min, max, auto),

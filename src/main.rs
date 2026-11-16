@@ -1,7 +1,17 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 use encoding_rs::WINDOWS_1250;
 use fltk::{dialog::*, enums::*, frame::Frame, prelude::*, *};
-use std::{cell::Cell, cell::RefCell, fs, path::PathBuf, rc::Rc, sync::mpsc};
+use std::{
+    cell::Cell,
+    cell::RefCell,
+    fs,
+    path::{Path, PathBuf},
+    rc::Rc,
+    sync::{
+        atomic::{AtomicBool, Ordering::Relaxed},
+        mpsc,
+    },
+};
 
 mod engine;
 mod numinput;
@@ -15,8 +25,13 @@ fn png(name: &str, d: &[u8]) -> image::PngImage {
     image::PngImage::from_data(d).unwrap_or_else(|e| panic!("tex/{name}.png: {e}"))
 }
 
-// Image button from tex/<name>_off.png + tex/<name>_on.png (on = hovered); the PNG sets the size.
-fn btn(off: image::PngImage, on: image::PngImage, x: i32, y: i32) -> button::Button {
+// The window icon (the OS needs a raster) and the backdrop (too fancy for nanosvg) stay PNG; everything else in tex/ is SVG.
+fn svg(name: &str, d: &str) -> image::SvgImage {
+    image::SvgImage::from_data(d).unwrap_or_else(|e| panic!("tex/{name}.svg: {e}"))
+}
+
+// Image button from tex/<name>_off.svg + tex/<name>_on.svg (on = hovered); the SVG's width/height set the size.
+fn btn(off: image::SvgImage, on: image::SvgImage, x: i32, y: i32) -> button::Button {
     let mut b = button::Button::new(x, y, off.w(), off.h(), None);
     b.set_frame(FrameType::NoBox);
     b.set_image(Some(off.clone()));
@@ -38,13 +53,13 @@ fn btn(off: image::PngImage, on: image::PngImage, x: i32, y: i32) -> button::But
 macro_rules! btn {
     ($n:literal, $x:expr, $y:expr) => {
         btn(
-            png(
+            svg(
                 concat!($n, "_off"),
-                include_bytes!(concat!("../tex/", $n, "_off.png")),
+                include_str!(concat!("../tex/", $n, "_off.svg")),
             ),
-            png(
+            svg(
                 concat!($n, "_on"),
-                include_bytes!(concat!("../tex/", $n, "_on.png")),
+                include_str!(concat!("../tex/", $n, "_on.svg")),
             ),
             $x,
             $y,
@@ -52,8 +67,8 @@ macro_rules! btn {
     };
 }
 
-// Decorative separator (tex/sep.png), vertically centred on cy.
-fn sep(img: &image::PngImage, x: i32, cy: i32) {
+// Decorative separator (tex/sep.svg), vertically centred on cy.
+fn sep(img: &image::SvgImage, x: i32, cy: i32) {
     let mut f = Frame::new(x, cy - img.h() / 2, img.w(), img.h(), None);
     f.set_image(Some(img.clone()));
 }
@@ -111,6 +126,7 @@ fn editor(
     // Overlay after the base draw: a line above every page's first row, and (optionally) · / ¶ for
     // invisible characters, which fltk can't show.
     ed.super_draw_first(true);
+    ed.super_handle_first(false); // our handler (right-click menu, drops) must run before FLTK's own
     ed.draw(move |e| {
         let Some(b) = e.buffer() else {
             return;
@@ -153,6 +169,104 @@ fn editor(
 fn cache() -> PathBuf {
     let dir = std::env::var_os("APPDATA").or_else(|| std::env::var_os("HOME"));
     PathBuf::from(dir.unwrap_or_else(|| ".".into())).join(".tablica_port")
+}
+
+type OnDrop = Rc<dyn Fn(PathBuf)>;
+thread_local!(static ON_DROP: RefCell<Option<OnDrop>> = const { RefCell::new(None) });
+static DROP: AtomicBool = AtomicBool::new(false);
+
+// "file:///a%20b" (X11/Wayland) or a plain path (Windows) -> path
+fn uri_path(l: &str) -> PathBuf {
+    let l = l.trim();
+    let Some(r) = l.strip_prefix("file://") else {
+        return l.into();
+    };
+    let (b, mut v, mut i) = (r.as_bytes(), vec![], 0);
+    while i < b.len() {
+        match r
+            .get(i + 1..i + 3)
+            .and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            Some(x) if b[i] == b'%' => (v.push(x), i += 3),
+            _ => (v.push(b[i]), i += 1),
+        };
+    }
+    String::from_utf8_lossy(&v).into_owned().into()
+}
+
+// Drag & drop for the window and every widget: never pastes dropped paths into a text area; a dropped
+// file is opened instead. FLTK delivers the drop as Paste right after DndRelease.
+pub fn dnd(ev: Event) -> bool {
+    match ev {
+        Event::DndEnter | Event::DndLeave => {
+            DROP.store(false, Relaxed);
+            true
+        }
+        Event::DndDrag => true,
+        Event::DndRelease => {
+            DROP.store(true, Relaxed);
+            true
+        }
+        Event::Paste if DROP.swap(false, Relaxed) => {
+            let p = uri_path(app::event_text().lines().next().unwrap_or_default());
+            if p.is_file()
+                && !MODAL.load(Relaxed)
+                && let Some(f) = ON_DROP.with(|h| h.borrow().clone())
+            {
+                f(p)
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+// Polish right-click menu for the editors (FLTK has none for text editors).
+fn ctx(e: &mut text::TextEditor) {
+    let Some(mut b) = e.buffer() else { return };
+    let _ = e.take_focus();
+    let m = menu::MenuItem::new(&["Wytnij", "Kopiuj", "Wklej", "Zaznacz wszystko"])
+        .popup(app::event_x(), app::event_y());
+    let sel = b.selection_text();
+    match m.and_then(|m| m.label()).as_deref() {
+        Some("Wytnij") if !sel.is_empty() => {
+            app::copy(&sel);
+            b.remove_selection();
+        }
+        Some("Kopiuj") if !sel.is_empty() => app::copy(&sel),
+        Some("Wklej") => app::paste(&*e),
+        Some("Zaznacz wszystko") => b.select(0, b.length()),
+        _ => {}
+    }
+}
+
+// Load a file into the editors and remember it as the current file.
+fn open_file(
+    f: &Path,
+    b: &mut text::TextBuffer,
+    tb: &mut text::TextBuffer,
+    path: &RefCell<Option<PathBuf>>,
+    msg: &mut Frame,
+) {
+    match fs::read(f)
+        .map_err(|e| e.to_string())
+        .and_then(|t| load(&t))
+    {
+        Ok(l) => {
+            tb.set_text(&l.title);
+            b.set_text(&l.body);
+            *path.borrow_mut() = Some(f.to_path_buf());
+            msg.set_label(&if l.soft + l.hard > 0 {
+                format!(
+                    "Otwarto; zawinięto linie: miękko {}, twardo {}",
+                    l.soft, l.hard
+                )
+            } else {
+                "Otwarto".to_string()
+            });
+        }
+        Err(e) => alert_default(&format!("Nie można otworzyć: {e}")),
+    }
 }
 
 const DECO: &[u8] = b"<------------------>";
@@ -348,11 +462,25 @@ fn rules(
         }
     };
     ed.handle(move |e, ev| {
+        if dnd(ev) {
+            return true;
+        }
+        if ev == Event::Push && app::event_mouse_button() == app::MouseButton::Right {
+            ctx(e);
+            return true;
+        }
         if matches!(ev, Event::KeyUp | Event::Released | Event::Focus) {
             upd(e);
         }
         false
     });
+}
+
+// "[#####               ] 25%"
+fn bar(done: u32, total: u32) -> String {
+    let p = (done * 100 / total.max(1)).min(100);
+    let n = (p / 5) as usize;
+    format!("[{}{}] {p}%", "#".repeat(n), " ".repeat(20 - n))
 }
 
 // Selected port name (index 0 is the "not selected" entry). The names are kept separately because
@@ -481,6 +609,103 @@ fn to_pages(title: &str, body: &str) -> Result<(sign::Pages, usize), String> {
     Ok((pages, replaced))
 }
 
+// While the "Więcej" overlay is up, dropped files are ignored too.
+static MODAL: AtomicBool = AtomicBool::new(false);
+
+fn close_overlay(g: &mut group::Group, ed: &mut text::TextEditor) {
+    g.hide();
+    MODAL.store(false, Relaxed);
+    let _ = ed.take_focus();
+}
+
+// "Więcej" overlay, drawn on top of the whole UI (create it last, inside the root group). It dims what
+// is behind it and swallows every mouse/key event, so nothing underneath can be touched.
+// UI only for now: none of the controls do anything yet.
+fn more_overlay(ed: &text::TextEditor) -> group::Group {
+    let (ox, oy) = ((960 - 460) / 2, (728 - 440) / 2);
+    let mut g = group::Group::new(0, 0, 960, 728, None);
+
+    // dim the app behind with a 50% stipple (FLTK has no alpha fill)
+    let mut scrim = Frame::new(0, 0, 960, 728, None);
+    scrim.draw(|f| {
+        draw::set_draw_color(Color::from_hex(0x1A2A1E));
+        for y in (f.y()..f.y() + f.h()).step_by(2) {
+            draw::draw_line(f.x(), y, f.x() + f.w(), y);
+        }
+    });
+
+    let mut panel = Frame::new(ox, oy, 460, 440, None);
+    panel.set_frame(FrameType::BorderBox);
+    panel.set_color(Color::from_hex(0xFBF3DC));
+
+    let mut title = lbl("Dodatki", ox + 16, oy + 12, 428, 28, 20);
+    title.set_label_font(Font::HelveticaBold);
+
+    let mut psalms = button::Button::new(ox + 16, oy + 52, 428, 36, "Psalmy na miesiąc");
+    psalms.set_tooltip("Pobieranie Psalmów na miesiąc");
+
+    let mut themes = button::CheckButton::new(ox + 16, oy + 104, 428, 24, "Motywy okolicznościowe");
+    themes.set_value(true);
+
+    // background thumbnails (radio: one selected). a single bg for now, push more into the array.
+    let bgs = [png("bg", include_bytes!("../tex/bg.png"))];
+    for (i, mut img) in bgs.into_iter().enumerate() {
+        img.scale(120, 91, true, true);
+        let mut b = button::RadioButton::new(ox + 16 + 136 * i as i32, oy + 136, 128, 100, None);
+        b.set_frame(FrameType::BorderBox);
+        b.set_down_frame(FrameType::BorderBox);
+        b.set_color(Color::White);
+        b.set_selection_color(Color::from_hex(0xEED590));
+        b.set_image(Some(img));
+        b.set_value(i == 0);
+    }
+
+    let mut line = Frame::new(ox + 16, oy + 248, 428, 1, None);
+    line.set_frame(FrameType::FlatBox);
+    line.set_color(Color::from_rgb(200, 190, 150));
+    lbl("Przetwarzanie wsadowe", ox + 16, oy + 256, 428, 24, 14);
+    // batch read / write / interrupt: the same textures as the toolbar (the main interrupt is under the overlay)
+    btn!("odczytaj", ox + 16, oy + 284);
+    btn!("wyslij", ox + 88, oy + 284);
+    btn!("przerwij", ox + 160, oy + 284);
+    let mut prog = lbl(&bar(0, 1), ox + 16, oy + 356, 428, 24, 13);
+    prog.set_label_font(FONT);
+
+    let mut close = button::Button::new(ox + 344, oy + 398, 100, 28, "Zamknij");
+    close.set_callback({
+        let mut ed = ed.clone();
+        move |b| {
+            if let Some(mut g) = b.parent() {
+                close_overlay(&mut g, &mut ed);
+            }
+        }
+    });
+    g.end();
+    g.hide();
+    // Esc closes; every other mouse/key event is swallowed (the group's own handler runs after its children)
+    g.handle({
+        let mut ed = ed.clone();
+        move |g, ev| {
+            if ev == Event::KeyDown && app::event_key() == Key::Escape {
+                close_overlay(g, &mut ed);
+                return true;
+            }
+            matches!(
+                ev,
+                Event::Push
+                    | Event::Released
+                    | Event::Drag
+                    | Event::Move
+                    | Event::MouseWheel
+                    | Event::KeyDown
+                    | Event::KeyUp
+                    | Event::Shortcut
+            )
+        }
+    });
+    g
+}
+
 fn main() {
     let app = app::App::default();
     // the UI is a fixed 960x728; on a smaller screen scale it down to fit the work area
@@ -525,7 +750,7 @@ fn main() {
         }
     });
 
-    // window buttons (the PNGs are baked onto bg.png at exactly these positions)
+    // window buttons (the button SVGs are baked onto bg.png at exactly these positions)
     let mut min = btn!("min", 882, 12);
     let mut close = btn!("close", 928, 12);
     min.set_callback({
@@ -540,13 +765,13 @@ fn main() {
     let mut save = btn!("zapisz", 155, 82);
     let mut get = btn!("odczytaj", 223, 82);
     let mut put_sign = btn!("wyslij", 291, 82);
-    // interrupt button: the wyslij texture again, right after it (must be made before root.end())
+    // interrupt button: right after wyslij (must be made before root.end())
     let mut stop = btn!("przerwij", 359, 82);
     // slot number above read, page count above write (centred over the 64px buttons)
     let mut num = NumInput::new(229, 56, 0, 999, false);
     num.set_value(1);
     let pgs = NumInput::new(297, 56, 0, 127, true); // 0 = auto
-    btn!("ustaw", 814, 82);
+    let mut more = btn!("ustaw", 814, 82); // "Więcej"; rename the tex/ustaw_*.svg pair and this string together
     let mut info = btn!("info", 882, 82);
     // Groups left to right: files (64px) | horizontal align (36px each, 4px apart) |
     // vertical align (top / centred) | invisibles | settings. The groups after the files use
@@ -559,7 +784,7 @@ fn main() {
     );
     let (mut vtop, mut vmid) = (btn!("pion_gora", 631, 100), btn!("pion_srodek", 671, 100));
     let mut marks = btn!("znaki", 733, 100);
-    let sp = png("sep", include_bytes!("../tex/sep.png"));
+    let sp = svg("sep", include_str!("../tex/sep.svg"));
     for x in [435, 617, 719, 793] {
         sep(&sp, x, 118);
     }
@@ -574,25 +799,23 @@ fn main() {
     title_buf.set_text(&default_title());
 
     // right panel: page
-    let page = lbl("Strona - 001", 522, 183, 200, 34, 17);
-    let kw2 = lbl("K: 1   W: 1", 740, 183, 120, 34, 14);
+    let page = lbl("Strona - 001", 586, 183, 200, 34, 17);
+    let kw2 = lbl("K: 1   W: 1", 804, 183, 120, 34, 14);
     let mut search = btn!("szukaj", 898, 186);
-    let (mut ed, buf) = editor(486, 227, 12, 48, show.clone(), true);
+    let (mut ed, buf) = editor(550, 227, 12, 48, show.clone(), true);
     rules(&mut ed, &buf, None, kw2, Some(page));
 
     // status bar
     let mut com = lbl("COM-", 60, 676, 100, 24, 16);
     com.set_label_color(Color::from_hex(0xEED590));
-    let mut msg = lbl("", 330, 676, 370, 24, 13); // right of the decoration, ends before the status dot
+    let mut msg = lbl("", 300, 670, 345, 24, 13); // the status widget in the middle of the bar
+    msg.set_align(Align::Center | Align::Inside);
     msg.set_label_color(Color::from_hex(0xEED590)); // same as the COM label
     // connection status dot, left of the port dropdown: green after a successful read/write,
     // red after a failure and whenever another port is picked
     let (dot_on, dot_off) = (
-        png("status_dot_on", include_bytes!("../tex/status_dot_on.png")),
-        png(
-            "status_dot_off",
-            include_bytes!("../tex/status_dot_off.png"),
-        ),
+        svg("status_dot_on", include_str!("../tex/status_dot_on.svg")),
+        svg("status_dot_off", include_str!("../tex/status_dot_off.svg")),
     );
     let mut dot = Frame::new(709, 679, 15, 15, None);
     dot.set_image(Some(dot_off.clone()));
@@ -628,9 +851,22 @@ fn main() {
         com.set_label(&ports[i]);
     }
 
+    // "Więcej" overlay: last child of root, so it sits on top of everything
+    let overlay = more_overlay(&ed);
+    more.set_callback({
+        let mut o = overlay.clone();
+        move |_| {
+            MODAL.store(true, Relaxed);
+            o.show();
+            app::set_focus(&o); // keys must not reach the editor underneath
+        }
+    });
+
     root.end();
     win.end();
     win.resize_callback(move |_, _, _, w, h| root.set_pos((w - 960) / 2, (h - 728) / 2));
+    win.super_handle_first(false);
+    win.handle(|_, ev| dnd(ev));
     win.show();
     let _ = ed.take_focus(); // start typing in the page editor
 
@@ -704,37 +940,26 @@ fn main() {
             *path.borrow_mut() = None;
         }
     });
+    let open_path: OnDrop = Rc::new({
+        let (b, tb, path, msg) = (buf.clone(), title_buf.clone(), path.clone(), msg.clone());
+        move |f| open_file(&f, &mut b.clone(), &mut tb.clone(), &path, &mut msg.clone())
+    });
+    ON_DROP.with(|h| *h.borrow_mut() = Some(open_path.clone()));
     open.set_callback({
-        let (mut b, mut tb, path, mut msg) =
-            (buf.clone(), title_buf.clone(), path.clone(), msg.clone());
+        let open_path = open_path.clone();
         move |_| {
             let mut d = NativeFileChooser::new(NativeFileChooserType::BrowseFile);
             d.show();
             let f = d.filename();
-            if f.as_os_str().is_empty() {
-                return;
-            }
-            match fs::read(&f)
-                .map_err(|e| e.to_string())
-                .and_then(|t| load(&t))
-            {
-                Ok(l) => {
-                    tb.set_text(&l.title);
-                    b.set_text(&l.body);
-                    *path.borrow_mut() = Some(f);
-                    msg.set_label(&if l.soft + l.hard > 0 {
-                        format!(
-                            "Otwarto; zawinięto linie: miękko {}, twardo {}",
-                            l.soft, l.hard
-                        )
-                    } else {
-                        "Otwarto".to_string()
-                    });
-                }
-                Err(e) => alert_default(&format!("Nie można otworzyć: {e}")),
+            if !f.as_os_str().is_empty() {
+                open_path(f);
             }
         }
     });
+    // "Open with" / file argument: load it at launch
+    if let Some(a) = std::env::args_os().nth(1) {
+        open_path(a.into());
+    }
     save.set_callback({
         let (b, tb, path, mut msg) = (buf.clone(), title_buf.clone(), path.clone(), msg.clone());
         move |_| {
@@ -812,7 +1037,17 @@ fn main() {
             };
             let (n, k) = (num.value() as u16, pgs.value() as u8);
             busy.set(true);
-            msg.set_label("Odczyt z tablicy...");
+            // monospace so the bar doesn't jiggle; auto mode (0 pages) counts against the 127-page max
+            let total = 1 + if k == 0 { 127 } else { k as u32 };
+            msg.set_label_font(FONT);
+            msg.set_label(&bar(0, total));
+            let (mut m, b) = (msg.clone(), busy.clone());
+            app::add_timeout3(0.1, move |h| {
+                if b.get() {
+                    m.set_label(&bar(sign::done(), total));
+                    app::repeat_timeout3(0.1, h);
+                }
+            });
             let (mut buf, mut tbuf, mut msg, busy, set_dot) = (
                 buf.clone(),
                 tbuf.clone(),
@@ -825,6 +1060,7 @@ fn main() {
                 move || sign::read(&name, n, k).map_err(|e| e.to_string()),
                 move |r| {
                     busy.set(false);
+                    msg.set_label_font(Font::Helvetica);
                     set_dot(r.is_ok());
                     if r.is_ok() {
                         let _ = fs::write(cache(), saved);

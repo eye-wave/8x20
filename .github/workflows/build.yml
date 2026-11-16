@@ -77,8 +77,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: tugal-${{ matrix.name }}
+          name: tablica-${{ matrix.name }}
           path: |
-            target/${{ matrix.target }}/release/tugal
-            target/${{ matrix.target }}/release/tugal.exe
+            target/${{ matrix.target }}/release/tablica
+            target/${{ matrix.target }}/release/tablica.exe
           if-no-files-found: error

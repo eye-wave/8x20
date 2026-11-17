@@ -1,7 +1,7 @@
 use super::*;
 
-pub type OnDrop = Rc<dyn Fn(PathBuf)>;
-thread_local!(pub static ON_DROP: RefCell<Option<OnDrop>> = const { RefCell::new(None) });
+// Dropped files go to the main loop (see main), which opens them.
+pub static DROPS: OnceLock<mpsc::Sender<PathBuf>> = OnceLock::new();
 pub static DROP: AtomicBool = AtomicBool::new(false);
 
 // "file:///a%20b" (X11/Wayland) or a plain path (Windows) -> path
@@ -40,9 +40,10 @@ pub fn dnd(ev: Event) -> bool {
             let p = uri_path(app::event_text().lines().next().unwrap_or_default());
             if p.is_file()
                 && !MODAL.load(Relaxed)
-                && let Some(f) = ON_DROP.with(|h| h.borrow().clone())
+                && let Some(tx) = DROPS.get()
             {
-                f(p)
+                let _ = tx.send(p);
+                app::awake();
             }
             true
         }

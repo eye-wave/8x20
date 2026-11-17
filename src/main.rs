@@ -2,12 +2,12 @@
 use encoding_rs::WINDOWS_1250;
 use fltk::{dialog::*, enums::*, frame::Frame, prelude::*, *};
 use std::{
-    cell::{Cell, RefCell},
+    cell::Cell,
     fs,
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
-        LazyLock,
+        Arc, LazyLock, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering::Relaxed},
         mpsc,
     },
@@ -20,6 +20,7 @@ mod engine;
 mod file;
 mod numinput;
 mod overlay;
+mod psalms;
 mod sign;
 mod theme;
 mod util;
@@ -32,6 +33,7 @@ use engine::{Al, COLS, ROWS, align, align_line, bad, kill, put, rejoin, tidy, va
 use file::*;
 use numinput::NumInput;
 use overlay::*;
+use psalms::*;
 use theme::{
     CUR, THEMES, Theme, apply_theme, img, pick_theme, png, seasonal_on, skin, theme, tint,
 };
@@ -49,7 +51,7 @@ fn main() {
     app::set_visible_focus(false);
     app::set_font_size(14);
 
-    CUR.set(pick_theme()); // seasonal / saved theme, before any widget is built
+    CUR.store(pick_theme(), Relaxed); // seasonal / saved theme, before any widget is built
     tint();
     let mut win = window::Window::default()
         .with_size(960, 728)
@@ -169,15 +171,15 @@ fn main() {
     });
     // connection status dot, left of the port dropdown: green after a successful read/write,
     // red after a failure and whenever another port is picked
-    let ok = Rc::new(Cell::new(false));
+    let ok = Arc::new(AtomicBool::new(false));
     let mut dot = Frame::new(709, 679, 15, 15, None);
     paint_dot(&mut dot, theme(), false);
     skin({
         let (mut d, ok) = (dot.clone(), ok.clone());
-        move |t| paint_dot(&mut d, t, ok.get())
+        move |t| paint_dot(&mut d, t, ok.load(Relaxed))
     });
     let set_dot: Rc<dyn Fn(bool)> = Rc::new(move |v| {
-        ok.set(v);
+        ok.store(v, Relaxed);
         paint_dot(&mut dot.clone(), theme(), v);
     });
     let mut names = sign::ports();
@@ -237,7 +239,7 @@ fn main() {
     }
 
     // "Więcej" overlay: last child of root, so it sits on top of everything
-    let psalms = placeholder_overlay("Psalmy na miesiąc", &ed);
+    let psalms = psalms_overlay(&ed);
     let batch = placeholder_overlay("Przetwarzanie wsadowe", &ed);
     let overlay = more_overlay(&ed, &psalms, &batch);
     more.set_callback({
@@ -313,9 +315,8 @@ fn main() {
     });
 
     // actions (plain text, right-hand page)
-    let path: Rc<RefCell<Option<PathBuf>>> = Rc::default();
     new.set_callback({
-        let (mut b, mut tb, path) = (buf.clone(), title_buf.clone(), path.clone());
+        let (mut b, mut tb) = (buf.clone(), title_buf.clone());
         move |_| {
             // a project that is empty (or still the untouched default) is replaced without asking
             let dirty = !b.text().is_empty() || tb.text() != default_title();
@@ -329,14 +330,15 @@ fn main() {
             }
             b.set_text("");
             tb.set_text(&default_title());
-            *path.borrow_mut() = None;
+            *CUR_FILE.lock().unwrap() = None;
         }
     });
-    let open_path: OnDrop = Rc::new({
-        let (b, tb, path, msg) = (buf.clone(), title_buf.clone(), path.clone(), msg.clone());
-        move |f| open_file(&f, &mut b.clone(), &mut tb.clone(), &path, &mut msg.clone())
+    let open_path = Rc::new({
+        let (b, tb, msg) = (buf.clone(), title_buf.clone(), msg.clone());
+        move |f: PathBuf| open_file(&f, &mut b.clone(), &mut tb.clone(), &mut msg.clone())
     });
-    ON_DROP.with(|h| *h.borrow_mut() = Some(open_path.clone()));
+    let (drop_tx, drop_rx) = mpsc::channel();
+    let _ = DROPS.set(drop_tx);
     open.set_callback({
         let open_path = open_path.clone();
         move |_| {
@@ -353,24 +355,27 @@ fn main() {
         open_path(a.into());
     }
     save.set_callback({
-        let (b, tb, path, mut msg) = (buf.clone(), title_buf.clone(), path.clone(), msg.clone());
+        let (b, tb, mut msg) = (buf.clone(), title_buf.clone(), msg.clone());
         move |_| {
             let (pages, rep) = match to_pages(&tb.text(), &b.text()) {
                 Ok(r) => r,
                 Err(e) => return popup(&format!("Nie można zapisać: {e}")),
             };
             let bytes = file_bytes(&pages);
-            if path.borrow().is_none() {
-                let mut d = NativeFileChooser::new(NativeFileChooserType::BrowseSaveFile);
-                d.set_option(NativeFileChooserOptions::SaveAsConfirm);
-                d.show();
-                let f = d.filename();
-                if f.as_os_str().is_empty() {
-                    return;
+            let p = {
+                let mut cur = CUR_FILE.lock().unwrap();
+                if cur.is_none() {
+                    let mut d = NativeFileChooser::new(NativeFileChooserType::BrowseSaveFile);
+                    d.set_option(NativeFileChooserOptions::SaveAsConfirm);
+                    d.show();
+                    let f = d.filename();
+                    if f.as_os_str().is_empty() {
+                        return;
+                    }
+                    *cur = Some(f);
                 }
-                *path.borrow_mut() = Some(f);
-            }
-            let p = path.borrow().clone().unwrap();
+                cur.clone().unwrap()
+            };
             match fs::write(&p, bytes) {
                 Ok(()) => msg.set_label(&if rep > 0 {
                     format!("Zapisano (Windows-1250); zamieniono znaki: {rep}")
@@ -525,7 +530,12 @@ fn main() {
         }
     });
 
-    app.run().unwrap();
+    // `run`, plus opening what was dropped on the window
+    while app.wait() {
+        while let Ok(f) = drop_rx.try_recv() {
+            open_path(f);
+        }
+    }
 }
 
 #[cfg(test)]

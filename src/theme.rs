@@ -1,4 +1,7 @@
-use std::cell::{Cell, RefCell};
+use std::sync::{
+    Mutex,
+    atomic::{AtomicUsize, Ordering::Relaxed},
+};
 
 use fltk::{app, enums::Color, image};
 
@@ -65,25 +68,26 @@ static SVG: &[(&str, &str)] = svgs!(
     "pion_srodek",
     "znaki",
     "szukaj",
-    "info"
+    "info",
+    "fmt_word",
+    "fmt_txt",
+    "pobierz"
 );
 
 // key -> theme, in themes.yaml order (the first is the default)
 include!(concat!(env!("OUT_DIR"), "/themes.rs"));
 
-type Skin = Box<dyn FnMut(&Theme)>;
-thread_local! {
-    pub static CUR: Cell<usize> = const { Cell::new(0) }; // index into THEMES
-    pub static SKINS: RefCell<Vec<Skin>> = const { RefCell::new(Vec::new()) }; // re-skin hooks of live widgets
-}
+type Skin = Box<dyn FnMut(&Theme) + Send>;
+pub static CUR: AtomicUsize = AtomicUsize::new(0); // index into THEMES
+static SKINS: Mutex<Vec<Skin>> = Mutex::new(Vec::new()); // re-skin hooks of live widgets
 
 pub fn theme() -> &'static Theme {
-    &THEMES[CUR.get()].1
+    &THEMES[CUR.load(Relaxed)].1
 }
 
 // Register how a widget re-skins itself when the theme changes.
-pub fn skin(f: impl FnMut(&Theme) + 'static) {
-    SKINS.with(|s| s.borrow_mut().push(Box::new(f)));
+pub fn skin(f: impl FnMut(&Theme) + Send + 'static) {
+    SKINS.lock().unwrap().push(Box::new(f));
 }
 
 // FLTK's own gray (dialogs, menus, scrollbars, plain buttons) -> the theme's panel / dark text colour.
@@ -96,9 +100,12 @@ pub fn tint() {
 }
 
 pub fn apply_theme(i: usize) {
-    CUR.set(i);
+    CUR.store(i, Relaxed);
     tint();
-    SKINS.with(|s| s.borrow_mut().iter_mut().for_each(|f| f(theme())));
+    // taken out while running, so a hook may register hooks of its own
+    let mut v = std::mem::take(&mut *SKINS.lock().unwrap());
+    v.iter_mut().for_each(|f| f(theme()));
+    SKINS.lock().unwrap().splice(0..0, v);
     app::redraw();
 }
 
@@ -135,18 +142,25 @@ pub fn img(t: &Theme, name: &str) -> image::SvgImage {
     )
 }
 
-// Today's (month, day), UTC (no date crate: Hinnant's civil-from-days).
-pub fn today() -> (u32, u32) {
+// Today's (year, month, day), UTC (no date crate: Hinnant's civil-from-days).
+pub fn civil() -> (i32, u32, u32) {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     let z = (secs / 86400) as i64 + 719_468;
-    let doe = z.rem_euclid(146_097);
+    let (era, doe) = (z.div_euclid(146_097), z.rem_euclid(146_097));
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (m as u32, (doy - (153 * mp + 2) / 5 + 1) as u32)
+    let y = yoe + era * 400 + (m <= 2) as i64;
+    (y as i32, m as u32, (doy - (153 * mp + 2) / 5 + 1) as u32)
+}
+
+// Today's (month, day).
+pub fn today() -> (u32, u32) {
+    let (_, m, d) = civil();
+    (m, d)
 }
 
 pub fn seasonal_on() -> bool {

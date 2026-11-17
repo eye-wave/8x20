@@ -3,40 +3,25 @@ use super::*;
 // Image button from <name>_off.svg + <name>_on.svg (on = hovered); the SVG's width/height set the size,
 // so every theme's textures must have the same sizes.
 pub fn btn(name: &'static str, x: i32, y: i32) -> button::Button {
-    let t = theme();
-    let imgs = Rc::new(RefCell::new((
-        img(t, &format!("{name}_off")),
-        img(t, &format!("{name}_on")),
-    )));
-    let (w, h) = (imgs.borrow().0.w(), imgs.borrow().0.h());
-    let mut b = button::Button::new(x, y, w, h, None);
+    // no cached state: the images are rebuilt from the current theme whenever they are needed
+    let face =
+        move |t: &Theme, on: bool| img(t, &format!("{name}_{}", if on { "on" } else { "off" }));
+    let i = face(theme(), false);
+    let mut b = button::Button::new(x, y, i.w(), i.h(), None);
     b.set_frame(FrameType::NoBox);
-    b.set_image(Some(imgs.borrow().0.clone()));
-    b.handle({
-        let imgs = imgs.clone();
-        move |b, ev| match ev {
-            Event::Enter | Event::Leave => {
-                let i = imgs.borrow();
-                b.set_image(Some(if ev == Event::Enter {
-                    i.1.clone()
-                } else {
-                    i.0.clone()
-                }));
-                b.redraw();
-                true
-            }
-            _ => false,
+    b.set_image(Some(i));
+    b.handle(move |b, ev| match ev {
+        Event::Enter | Event::Leave => {
+            b.set_image(Some(face(theme(), ev == Event::Enter)));
+            b.redraw();
+            true
         }
+        _ => false,
     });
     skin({
         let mut b = b.clone();
         move |t| {
-            let n = (
-                img(t, &format!("{name}_off")),
-                img(t, &format!("{name}_on")),
-            );
-            b.set_image(Some(n.0.clone()));
-            *imgs.borrow_mut() = n;
+            b.set_image(Some(face(t, false)));
             b.redraw();
         }
     });
@@ -101,7 +86,7 @@ pub fn paint_btn<B: ButtonExt>(b: &mut B, t: &Theme) {
 }
 
 // Same, and re-coloured on theme change (only for buttons that live as long as the app).
-pub fn style_btn<B: ButtonExt + Clone + 'static>(b: &mut B) {
+pub fn style_btn<B: ButtonExt + Clone + 'static + Send>(b: &mut B) {
     paint_btn(b, theme());
     let mut b = b.clone();
     skin(move |t| paint_btn(&mut b, t));

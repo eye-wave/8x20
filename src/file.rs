@@ -1,13 +1,10 @@
 use super::*;
 
+// The file the editors came from / were last saved to (None = not saved yet).
+pub static CUR_FILE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
 // Load a file into the editors and remember it as the current file.
-pub fn open_file(
-    f: &Path,
-    b: &mut text::TextBuffer,
-    tb: &mut text::TextBuffer,
-    path: &RefCell<Option<PathBuf>>,
-    msg: &mut Frame,
-) {
+pub fn open_file(f: &Path, b: &mut text::TextBuffer, tb: &mut text::TextBuffer, msg: &mut Frame) {
     match fs::read(f)
         .map_err(|e| e.to_string())
         .and_then(|t| load(&t))
@@ -15,7 +12,7 @@ pub fn open_file(
         Ok(l) => {
             tb.set_text(&l.title);
             b.set_text(&l.body);
-            *path.borrow_mut() = Some(f.to_path_buf());
+            *CUR_FILE.lock().unwrap() = Some(f.to_path_buf());
             msg.set_label(&if l.soft + l.hard > 0 {
                 format!(
                     "Otwarto; zawinięto linie: miękko {}, twardo {}",

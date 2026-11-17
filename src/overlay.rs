@@ -76,7 +76,7 @@ pub fn more_overlay(
         b.set_selection_color(Color::from_hex(theme().colors.accent));
         b.set_image(Some(thumb));
         b.set_tooltip(t.name);
-        b.set_value(i == CUR.get());
+        b.set_value(i == CUR.load(Relaxed));
         b.set_callback(move |_| {
             apply_theme(i);
             cfg_set("theme", key);
@@ -94,7 +94,7 @@ pub fn more_overlay(
             cfg_set("seasonal", if c.value() { "1" } else { "0" });
             apply_theme(pick_theme());
             for (i, r) in radios.iter_mut().enumerate() {
-                r.set_value(i == CUR.get());
+                r.set_value(i == CUR.load(Relaxed));
             }
         }
     });
@@ -129,7 +129,7 @@ pub fn more_overlay(
 }
 
 // Dim the app behind with a 50% stipple (FLTK has no alpha fill).
-fn scrim() {
+pub fn scrim() {
     let mut scrim = Frame::new(0, 0, 960, 728, None);
     scrim.draw(|f| {
         draw::set_draw_color(Color::from_hex(theme().colors.scrim));
@@ -140,7 +140,7 @@ fn scrim() {
 }
 
 // Esc closes; every other mouse/key event is swallowed (the group's own handler runs after its children).
-fn modal_keys(g: &mut group::Group, ed: &text::TextEditor) {
+pub fn modal_keys(g: &mut group::Group, ed: &text::TextEditor) {
     g.handle({
         let mut ed = ed.clone();
         move |g, ev| {

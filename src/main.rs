@@ -267,6 +267,8 @@ fn main() {
         dnd(ev)
     });
     win.show();
+    #[cfg(windows)]
+    crate::util::taskbar(&win);
     let _ = ed.take_focus(); // start typing in the page editor
 
     // alignment acts on the focused editor (body if none); clicks don't steal focus (visible_focus is off)

@@ -72,3 +72,21 @@ pub fn bg<T: Send + 'static>(
         Err(_) => {}
     });
 }
+
+#[cfg(windows)]
+pub fn taskbar(win: &window::Window) {
+    use std::ffi::c_void;
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetWindowLongW(h: *mut c_void, i: i32) -> i32;
+        fn SetWindowLongW(h: *mut c_void, i: i32, v: i32) -> i32;
+        fn ShowWindow(h: *mut c_void, c: i32) -> i32;
+    }
+    let h = win.raw_handle() as *mut c_void;
+    unsafe {
+        let s = GetWindowLongW(h, -20); // GWL_EXSTYLE
+        SetWindowLongW(h, -20, (s | 0x40000) & !0x80); // + WS_EX_APPWINDOW, - WS_EX_TOOLWINDOW
+        ShowWindow(h, 0); // hide + show so the taskbar notices
+        ShowWindow(h, 5);
+    }
+}

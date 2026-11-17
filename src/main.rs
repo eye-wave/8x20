@@ -13,6 +13,7 @@ use std::{
     },
 };
 
+mod batch;
 mod cfg;
 mod dnd;
 mod editor;
@@ -26,6 +27,7 @@ mod theme;
 mod util;
 mod widgets;
 
+use batch::*;
 use cfg::*;
 use dnd::*;
 use editor::*;
@@ -240,7 +242,8 @@ fn main() {
 
     // "Więcej" overlay: last child of root, so it sits on top of everything
     let psalms = psalms_overlay(&ed);
-    let batch = placeholder_overlay("Przetwarzanie wsadowe", &ed);
+    let busy = Rc::new(Cell::new(false)); // one serial job at a time, shared with the batch dialog
+    let batch = batch_overlay(&ed, &port, &ports, &set_dot, &busy);
     let overlay = more_overlay(&ed, &psalms, &batch);
     more.set_callback({
         let mut o = overlay.clone();
@@ -401,7 +404,6 @@ fn main() {
     });
 
     // projector read / write (slow serial I/O runs on a worker thread)
-    let busy = Rc::new(Cell::new(false));
     stop.set_callback({
         let (busy, mut msg) = (busy.clone(), msg.clone());
         move |_| {

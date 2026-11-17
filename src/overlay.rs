@@ -162,38 +162,3 @@ pub fn modal_keys(g: &mut group::Group, ed: &text::TextEditor) {
         }
     });
 }
-
-// Empty dialog with a title and "Zamknij", until the real one exists. Create it hidden, inside the root group.
-pub fn placeholder_overlay(title: &str, ed: &text::TextEditor) -> group::Group {
-    let (w, h) = (460, 200);
-    let (ox, oy) = ((960 - w) / 2, (728 - h) / 2);
-    let mut g = group::Group::new(0, 0, 960, 728, None);
-    scrim();
-    let mut panel = Frame::new(ox, oy, w, h, None);
-    panel.set_frame(FrameType::BorderBox);
-    panel.set_color(Color::from_hex(theme().colors.panel));
-    skin({
-        let mut p = panel.clone();
-        move |t| {
-            p.set_color(Color::from_hex(t.colors.panel));
-            p.redraw();
-        }
-    });
-    let mut t = lbl(title, ox + 16, oy + 12, w - 32, 28, 20);
-    t.set_label_font(Font::HelveticaBold);
-    lbl("Wkrótce.", ox + 16, oy + 60, w - 32, 24, 14);
-    let mut close = button::Button::new(ox + w - 116, oy + h - 44, 100, 28, "Zamknij");
-    style_btn(&mut close);
-    close.set_callback({
-        let mut ed = ed.clone();
-        move |b| {
-            if let Some(mut g) = b.parent() {
-                close_overlay(&mut g, &mut ed);
-            }
-        }
-    });
-    g.end();
-    g.hide();
-    modal_keys(&mut g, ed);
-    g
-}

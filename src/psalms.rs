@@ -202,7 +202,7 @@ fn days_in(y: u32, m: u32) -> u32 {
 
 // Scrape the psalms of one month. Calls `progress(done, total)` as it goes (drives the bar).
 // Stops at the first day whose materials are not published yet; days without verses are skipped.
-// ponytail: sequential, no retries; add when the site starts rate-limiting.
+// sequential, no retries; add when the site starts rate-limiting.
 fn fetch(year: u32, month: u32, progress: &dyn Fn(u32, u32)) -> Result<Vec<Psalm>, String> {
     // rustls (not schannel): Windows 7 schannel has TLS 1.2 off by default
     let agent: ureq::Agent = ureq::Agent::config_builder()
@@ -251,7 +251,7 @@ fn center(s: &str, h: usize) -> String {
 }
 
 // lines of at most 20 chars, broken at spaces
-// ponytail: the old "1-letter word never ends a line" step was dead code (never fired), so it is gone.
+// the old "1-letter word never ends a line" step was dead code (never fired), so it is gone.
 fn wrap(s: &str) -> String {
     let t = format!("{s}\n");
     let v: Vec<_> = RE
@@ -321,7 +321,7 @@ fn txt(p: &Psalm) -> Vec<u8> {
 }
 
 // ---- Word 2003 XML (port of formatters/xml) ----
-// ponytail: the old code joined JS arrays with template strings, which left stray "," between the
+// the old code joined JS arrays with template strings, which left stray "," between the
 // paragraphs; they are not emitted here (valid WordML without them).
 fn run(text: &str, color: &str) -> String {
     format!(

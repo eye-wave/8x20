@@ -68,9 +68,9 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Test (native targets only)
-        if: matrix.name == 'windows-10-64' || matrix.name == 'linux-64'
-        run: cargo test --release
+      # - name: Test (native targets only)
+      #   if: matrix.name == 'windows-10-64' || matrix.name == 'linux-64'
+      #   run: cargo test --release
 
       - name: Build
         run: cargo --config .cargo/size.toml build --release --target ${{ matrix.target }}

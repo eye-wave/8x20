@@ -219,7 +219,7 @@ fn fetch(year: u32, month: u32, progress: &dyn Fn(u32, u32)) -> Result<Vec<Psalm
             .get(&url)
             .call()
             .and_then(|mut r| r.body_mut().read_to_string())
-            .map_err(|_| NETWORK.to_string())?;
+            .map_err(|e| format!("{NETWORK} ({e})"))?;
         match scrape(&html, (year, month, day)) {
             Ok(p) => out.push(p),
             Err(e) if e == NOT_COMPLETED => break,

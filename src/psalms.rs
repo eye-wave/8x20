@@ -205,21 +205,24 @@ fn days_in(y: u32, m: u32) -> u32 {
 // sequential, no retries; add when the site starts rate-limiting.
 fn fetch(year: u32, month: u32, progress: &dyn Fn(u32, u32)) -> Result<Vec<Psalm>, String> {
     // rustls (not schannel): Windows 7 schannel has TLS 1.2 off by default
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .user_agent("Bot Izajasz")
-        .timeout_global(Some(std::time::Duration::from_secs(30)))
-        .build()
-        .into();
+
     let n = days_in(year, month);
     let mut out = vec![];
     for day in 1..=n {
         progress(day - 1, n);
         let url = format!("https://niezbednik.niedziela.pl/liturgia/{year}-{month:02}-{day:02}");
-        let html = agent
-            .get(&url)
-            .call()
-            .and_then(|mut r| r.body_mut().read_to_string())
+        let r = minreq::get(&url)
+            .with_header("User-Agent", "Bot Izajasz")
+            .with_timeout(30)
+            .send()
             .map_err(|e| format!("{NETWORK} ({e})"))?;
+        if r.status_code != 200 {
+            return Err(format!("{NETWORK} (HTTP {})", r.status_code));
+        }
+        let html = r
+            .as_str()
+            .map_err(|e| format!("{NETWORK} ({e})"))?
+            .to_string();
         match scrape(&html, (year, month, day)) {
             Ok(p) => out.push(p),
             Err(e) if e == NOT_COMPLETED => break,

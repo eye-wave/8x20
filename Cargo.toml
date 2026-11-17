@@ -3,7 +3,7 @@ cargo-features = ["profile-rustflags"]
 
 [package]
 name = "tablica"
-version = "0.2.1-dev"
+version = "0.2.2-dev"
 edition = "2024"
 
 [dependencies]

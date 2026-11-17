@@ -491,7 +491,7 @@ fn start(year: u32, month: u32, status: &Frame) {
             st.set_label(&match r.and_then(|f| save(f, &dir)) {
                 Ok(n) => format!("Zapisano plików: {n}"),
                 Err(e) => {
-                    popup(&e);
+                    let _ = fs::write("blad.txt", &e);
                     "Błąd".to_string()
                 }
             });

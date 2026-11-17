@@ -504,6 +504,9 @@ fn main() {
                 Err(e) => return msg.set_label(&e),
             };
             let n = num.value() as u16;
+            if ask(&format!("Nadpisać slot {n:03} w tablicy?"), &["Nie", "Tak"]) != Some(1) {
+                return;
+            }
             busy.set(true);
             msg.set_label("Zapis do tablicy...");
             let (mut pgs, mut msg, busy, set_dot) =

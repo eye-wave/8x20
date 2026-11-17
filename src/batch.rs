@@ -285,6 +285,25 @@ pub fn batch_overlay(
                 }
             }
             drop(r);
+
+            let mut ns: Vec<u16> = jobs.iter().map(|j| j.1).collect();
+            ns.sort();
+            let list = if ns.len() > 1 && ns.windows(2).all(|w| w[1] == w[0] + 1) {
+                format!("{:03}–{:03}", ns[0], ns[ns.len() - 1]) // no gaps: a plain range
+            } else {
+                let j = ns
+                    .iter()
+                    .take(8)
+                    .map(|n| format!("{n:03}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{j}{}", if ns.len() > 8 { ", ..." } else { "" })
+            };
+            let q = format!("Nadpisać w tablicy {} slotów?\n{list}", ns.len());
+            if ask(&q, &["Nie", "Tak"]) != Some(1) {
+                return;
+            }
+
             let total = jobs.len() as u32;
             let p = name.clone();
             // the port is reopened for every file (~0.5 s each); keep it open if that gets slow

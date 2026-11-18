@@ -37,7 +37,7 @@ use numinput::NumInput;
 use overlay::*;
 use psalms::*;
 use theme::{
-    CUR, THEMES, Theme, apply_theme, img, pick_theme, png, seasonal_on, skin, theme, tint,
+    CUR, THEMES, Theme, apply_theme, icon_on, img, pick_theme, png, seasonal_on, skin, theme, tint,
 };
 use util::*;
 use widgets::*;
@@ -97,8 +97,8 @@ fn main() {
     });
 
     // window buttons (the button SVGs are baked onto bg.png at exactly these positions)
-    let mut min = btn("min", 882, 12);
-    let mut close = btn("close", 928, 12);
+    let mut min = win_btn("min", 882, 12);
+    let mut close = win_btn("close", 928, 12);
     min.set_callback({
         let mut w = win.clone();
         move |_| w.iconize()
@@ -106,30 +106,33 @@ fn main() {
     close.set_callback(|_| app::quit());
 
     // toolbar
-    let mut new = btn("nowy", 19, 82);
-    let mut open = btn("otworz", 87, 82);
-    let mut save = btn("zapisz", 155, 82);
-    let mut get = btn("odczytaj", 223, 82);
-    let mut put_sign = btn("wyslij", 291, 82);
+    let mut new = tool_btn("bg_green", "icon_nowy", "Nowy", 19, 82);
+    let mut open = tool_btn("bg_gold", "icon_otworz", "Otwórz", 87, 82);
+    let mut save = tool_btn("bg_gold", "icon_zapisz", "Zapisz", 155, 82);
+    let mut get = tool_btn("bg_rose", "icon_odczytaj", "Odczytaj", 223, 82);
+    let mut put_sign = tool_btn("bg_lime", "icon_wyslij", "Wyślij", 291, 82);
     // interrupt button: right after wyslij (must be made before root.end())
-    let mut stop = btn("przerwij", 359, 82);
+    let mut stop = tool_btn("bg_orange", "icon_przerwij", "Przerwij", 359, 82);
     // slot number above read, page count above write (centred over the 64px buttons)
     let mut num = NumInput::new(229, 56, 0, 999, false);
     num.set_value(1);
     let pgs = NumInput::new(297, 56, 0, 127, true); // 0 = auto
-    let mut more = btn("dodatki", 814, 82); // "Więcej";
-    let mut info = btn("info", 882, 82);
+    let mut more = tool_btn("bg_gold", "icon_dodatki", "Dodatki", 814, 82); // "Więcej";
+    let mut info = tool_btn("bg_gold", "icon_info", "Info", 882, 82);
     // Groups left to right: files (64px) | horizontal align (36px each, 4px apart) |
     // vertical align (top / centred) | invisibles | settings. The groups after the files use
     // 12px gutters around a 2px separator because the toolbar is tight.
     let (mut left, mut center, mut right, mut just) = (
-        btn("lewo", 449, 100),
-        btn("srodek", 489, 100),
-        btn("prawo", 529, 100),
-        btn("justuj", 569, 100),
+        icon_btn("icon_lewo", 449, 100),
+        icon_btn("icon_srodek", 489, 100),
+        icon_btn("icon_prawo", 529, 100),
+        icon_btn("icon_justuj", 569, 100),
     );
-    let (mut vtop, mut vmid) = (btn("pion_gora", 631, 100), btn("pion_srodek", 671, 100));
-    let mut marks = btn("znaki", 733, 100);
+    let (mut vtop, mut vmid) = (
+        icon_btn("icon_pion_gora", 631, 100),
+        icon_btn("icon_pion_srodek", 671, 100),
+    );
+    let mut marks = icon_btn("icon_znaki", 733, 100);
     for x in [435, 617, 719, 793] {
         sep(x, 118);
     }
@@ -153,7 +156,7 @@ fn main() {
     // right panel: page
     let page = page_info(lbl("Strona - 001", 586, 183, 200, 34, 17));
     let kw2 = page_info(lbl("K: 1   W: 1", 804, 183, 120, 34, 14));
-    let mut search = btn("szukaj", 898, 186);
+    let mut search = search_btn(898, 186);
     let (mut ed, buf) = editor(550, 227, 12, 48, show.clone(), true);
     rules(&mut ed, &buf, None, kw2, Some(page));
 

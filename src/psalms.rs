@@ -13,10 +13,16 @@ pub enum Format {
     Tablica,
 }
 
-// (format, texture name in tex/ (63x71), file extension, caption drawn on the placeholder texture)
-const FORMATS: &[(Format, &str, &str, &str)] = &[
-    (Format::Word2003, "fmt_word", "xml", "Word"),
-    (Format::Tablica, "fmt_txt", "txt", "TXT"),
+// (format, button background, button icon, file extension, label)
+const FORMATS: &[(Format, &str, &str, &str, &str)] = &[
+    (
+        Format::Word2003,
+        "bg_blue",
+        "icon_fmt_word",
+        "xml",
+        "Word 2003",
+    ),
+    (Format::Tablica, "bg_gray", "icon_fmt_txt", "txt", "txt"),
 ];
 
 static FORMATS_ON: AtomicU8 = AtomicU8::new(0b11);
@@ -204,25 +210,21 @@ fn days_in(y: u32, m: u32) -> u32 {
 // Stops at the first day whose materials are not published yet; days without verses are skipped.
 // sequential, no retries; add when the site starts rate-limiting.
 fn fetch(year: u32, month: u32, progress: &dyn Fn(u32, u32)) -> Result<Vec<Psalm>, String> {
-    // rustls (not schannel): Windows 7 schannel has TLS 1.2 off by default
-
+    // attohttpc with rustls (see Cargo.toml): works on Windows 7
     let n = days_in(year, month);
     let mut out = vec![];
     for day in 1..=n {
         progress(day - 1, n);
         let url = format!("https://niezbednik.niedziela.pl/liturgia/{year}-{month:02}-{day:02}");
-        let r = minreq::get(&url)
-            .with_header("User-Agent", "Bot Izajasz")
-            .with_timeout(30)
+        let r = attohttpc::get(&url)
+            .header("User-Agent", "Bot Izajasz")
+            .timeout(std::time::Duration::from_secs(30))
             .send()
             .map_err(|e| format!("{NETWORK} ({e})"))?;
-        if r.status_code != 200 {
-            return Err(format!("{NETWORK} (HTTP {})", r.status_code));
+        if r.status().as_u16() != 200 {
+            return Err(format!("{NETWORK} (HTTP {})", r.status().as_u16()));
         }
-        let html = r
-            .as_str()
-            .map_err(|e| format!("{NETWORK} ({e})"))?
-            .to_string();
+        let html = r.text().map_err(|e| format!("{NETWORK} ({e})"))?;
         match scrape(&html, (year, month, day)) {
             Ok(p) => out.push(p),
             Err(e) if e == NOT_COMPLETED => break,
@@ -477,7 +479,7 @@ fn start(year: u32, month: u32, status: &Frame) {
             let ps = fetch(year, month, &progress)?;
             let mut files = vec![];
             for p in &ps {
-                for (i, &(f, _, ext, _)) in FORMATS.iter().enumerate() {
+                for (i, &(f, _, _, ext, _)) in FORMATS.iter().enumerate() {
                     if on >> i & 1 == 1 {
                         files.push((format!("{:03}.{ext}", p.day), render(p, f)));
                     }
@@ -549,11 +551,8 @@ pub fn psalms_overlay(ed: &text::TextEditor) -> group::Group {
             f
         })
         .collect();
-    for (i, &(_, tex, _, caption)) in FORMATS.iter().enumerate() {
-        let mut b = btn(tex, ox + 20 + i as i32 * 84, oy + 126);
-        b.set_label(caption); // placeholder: drop these 3 lines once the textures carry their own text
-        b.set_label_size(11);
-        b.set_label_color(Color::from_hex(theme().colors.scrim));
+    for (i, &(_, bg, icon, _, caption)) in FORMATS.iter().enumerate() {
+        let mut b = tool_btn(bg, icon, caption, ox + 20 + i as i32 * 84, oy + 126);
         let mut marks = marks.clone();
         b.set_callback(move |b| {
             // toggle; at least one format stays selected
@@ -568,8 +567,8 @@ pub fn psalms_overlay(ed: &text::TextEditor) -> group::Group {
         });
     }
 
-    // download button: 428x44 (tex/pobierz_{off,on}.svg) + the progress bar / result line
-    let mut dl = btn("pobierz", ox + 16, oy + 217);
+    // download button: 428x44 (tex/bg_wide_{off,on}.svg) + the progress bar / result line
+    let mut dl = download_btn(ox + 16, oy + 217);
     let mut status = lbl("", ox + 16, oy + 273, w - 32, 24, 13);
     status.set_frame(FrameType::FlatBox);
     dl.set_callback({

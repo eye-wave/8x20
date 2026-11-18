@@ -52,7 +52,8 @@ fn md(s: &str) -> (u32, u32) {
 
 // Every #rrggbb in tex/*.svg, plus "white".
 fn svg_colours() -> BTreeSet<u32> {
-    let mut set = BTreeSet::from([0xFFFFFF]);
+    // white; 0x1E4B2C is the icon hover stroke, applied in code (theme.rs `icon_on`)
+    let mut set = BTreeSet::from([0xFFFFFF, 0x1E4B2C]);
     for e in fs::read_dir("tex").unwrap().flatten() {
         if e.path().extension().is_some_and(|x| x == "svg") {
             let s = fs::read_to_string(e.path()).unwrap();

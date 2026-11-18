@@ -1,8 +1,7 @@
 use super::*;
 
-// Image button from <name>_off.svg + <name>_on.svg (on = hovered); the SVG's width/height set the size,
-// so every theme's textures must have the same sizes.
-pub fn btn(name: &'static str, x: i32, y: i32) -> button::Button {
+// Window button (min/close): <n>_off.svg + <n>_on.svg (on = hovered); the SVG's width/height set the size.
+pub fn win_btn(name: &'static str, x: i32, y: i32) -> button::Button {
     // no cached state: the images are rebuilt from the current theme whenever they are needed
     let face =
         move |t: &Theme, on: bool| img(t, &format!("{name}_{}", if on { "on" } else { "off" }));
@@ -26,6 +25,122 @@ pub fn btn(name: &'static str, x: i32, y: i32) -> button::Button {
         }
     });
     b
+}
+
+// Label/icon layout of a face button; the size itself comes from the background SVG.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Kind {
+    Tool,     // 63x71: icon, label centred under it, everything sinks 1px up when hovered
+    Icon,     // 35x36 / 27x28: icon only
+    Download, // 428x44: icon and label side by side
+}
+
+// Face button = background (bg_<colour>_{off,on}.svg) + icon (icon_<name>.svg, same canvas as the
+// background, drawn where it belongs) + label drawn here in code (regular, bold when hovered).
+// Rebuilt from the current theme on the first draw after a theme change.
+pub fn face_btn(
+    bg: &'static str,
+    icon: Option<&'static str>,
+    label: &'static str,
+    kind: Kind,
+    x: i32,
+    y: i32,
+) -> button::Button {
+    let faces = move |t: &Theme| {
+        (
+            [img(t, &format!("{bg}_off")), img(t, &format!("{bg}_on"))],
+            icon.map(|n| [img(t, n), icon_on(t, n)]),
+        )
+    };
+    let first = faces(theme());
+    let mut b = button::Button::new(x, y, first.0[0].w(), first.0[0].h(), None);
+    b.set_frame(FrameType::NoBox);
+    let hot = Rc::new(Cell::new(false));
+    let mut cache = (CUR.load(Relaxed), first);
+    b.draw({
+        let hot = hot.clone();
+        move |b| {
+            if cache.0 != CUR.load(Relaxed) {
+                cache = (CUR.load(Relaxed), faces(theme()));
+            }
+            let (_, (bgs, icons)) = &mut cache;
+            let on = hot.get();
+            let (x, y, w, h) = (b.x(), b.y(), b.w(), b.h());
+            bgs[on as usize].draw(x, y, w, h);
+            let sink = if on && kind == Kind::Tool { -1 } else { 0 };
+            if let Some(ic) = icons {
+                ic[on as usize].draw(x, y + sink, w, h);
+            }
+            if label.is_empty() {
+                return;
+            }
+            // light text on the dark green "nowy" face, the theme's dark colour elsewhere
+            let c = if bg == "bg_green" {
+                Color::White
+            } else {
+                Color::from_hex(theme().colors.scrim)
+            };
+            draw::set_draw_color(c);
+            let font = if on {
+                Font::HelveticaBold
+            } else {
+                Font::Helvetica
+            };
+            let mut size = if kind == Kind::Download { 16 } else { 13 };
+            draw::set_font(font, size);
+            while kind == Kind::Tool && draw::width(label) > (w - 6) as f64 && size > 8 {
+                size -= 1; // "Word 2003" and friends
+                draw::set_font(font, size);
+            }
+            if kind == Kind::Tool {
+                draw::draw_text2(label, x, y + 47 + sink, w, 14, Align::Center);
+            } else {
+                draw::draw_text2(label, x + 197, y + 10, w - 197, 20, Align::Left);
+            }
+        }
+    });
+    b.handle(move |b, ev| match ev {
+        Event::Enter | Event::Leave => {
+            hot.set(ev == Event::Enter);
+            b.redraw();
+            true
+        }
+        _ => false,
+    });
+    b
+}
+
+// 63x71 toolbar button: coloured background, icon, label.
+pub fn tool_btn(
+    bg: &'static str,
+    icon: &'static str,
+    label: &'static str,
+    x: i32,
+    y: i32,
+) -> button::Button {
+    face_btn(bg, Some(icon), label, Kind::Tool, x, y)
+}
+
+// 35x36 icon-only button (text justify, vertical align, ...).
+pub fn icon_btn(icon: &'static str, x: i32, y: i32) -> button::Button {
+    face_btn("bg_small", Some(icon), "", Kind::Icon, x, y)
+}
+
+// 27x28 icon-only search button.
+pub fn search_btn(x: i32, y: i32) -> button::Button {
+    face_btn("bg_search", Some("icon_szukaj"), "", Kind::Icon, x, y)
+}
+
+// 428x44 download button.
+pub fn download_btn(x: i32, y: i32) -> button::Button {
+    face_btn(
+        "bg_wide",
+        Some("icon_pobierz"),
+        "Pobierz",
+        Kind::Download,
+        x,
+        y,
+    )
 }
 
 // Decorative separator (sep.svg), vertically centred on cy.

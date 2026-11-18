@@ -176,7 +176,7 @@ pub fn rules(
 
 // Embedded Noto Sans Mono (Latin + Latin Extended, OFL, see font/OFL.txt): the same 0.6em x 1.362em cell on every OS,
 // so the editor matches the background art on Windows too (its Courier New fallback is much shorter per line).
-// fltk can only load fonts from a file, so it goes through the temp dir; falls back to system Courier on failure.
+// ponytail: fltk can only load fonts from a file, so it goes through the temp dir; falls back to system Courier on failure.
 pub fn load_mono() {
     let p = std::env::temp_dir().join("tablica-mono.ttf");
     if fs::write(&p, include_bytes!("../font/mono.ttf")).is_ok()

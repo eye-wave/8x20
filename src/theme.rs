@@ -36,42 +36,29 @@ pub struct Theme {
 // The window icon is the same in every theme.
 pub const ICON: &[u8] = include_bytes!("../tex/icon.png");
 
-// "nowy_off" -> svg source, ... (<n>_off/_on per button, sep, status_dot_on/off)
+// "bg_gold_off" -> svg source, ... Pairs are <n>_off/_on (button backgrounds, window buttons);
+// singles are one file (separator, status dots, button icons).
 macro_rules! svgs {
-    ($($n:literal),*) => {
+    (pairs $($n:literal),* ; one $($o:literal),*) => {
         &[
             $(
                 (concat!($n, "_off"), include_str!(concat!("../tex/", $n, "_off.svg"))),
                 (concat!($n, "_on"), include_str!(concat!("../tex/", $n, "_on.svg"))),
             )*
-            ("sep", include_str!("../tex/sep.svg")),
-            ("status_dot_on", include_str!("../tex/status_dot_on.svg")),
-            ("status_dot_off", include_str!("../tex/status_dot_off.svg")),
+            $(($o, include_str!(concat!("../tex/", $o, ".svg"))),)*
         ]
     };
 }
 static SVG: &[(&str, &str)] = svgs!(
-    "min",
-    "close",
-    "nowy",
-    "otworz",
-    "zapisz",
-    "odczytaj",
-    "wyslij",
-    "przerwij",
-    "dodatki",
-    "lewo",
-    "srodek",
-    "prawo",
-    "justuj",
-    "pion_gora",
-    "pion_srodek",
-    "znaki",
-    "szukaj",
-    "info",
-    "fmt_word",
-    "fmt_txt",
-    "pobierz"
+    pairs "min", "close",
+    // 63x71 tool buttons by colour, 35x36 icon-only, 27x28 search, 428x44 download
+    "bg_gold", "bg_green", "bg_lime", "bg_rose", "bg_orange", "bg_gray", "bg_blue",
+    "bg_small", "bg_search", "bg_wide";
+    one "sep", "status_dot_on", "status_dot_off",
+    "icon_nowy", "icon_otworz", "icon_zapisz", "icon_odczytaj", "icon_wyslij", "icon_przerwij",
+    "icon_dodatki", "icon_info", "icon_fmt_word", "icon_fmt_txt", "icon_pobierz",
+    "icon_lewo", "icon_srodek", "icon_prawo", "icon_justuj", "icon_pion_gora", "icon_pion_srodek",
+    "icon_znaki", "icon_szukaj"
 );
 
 // key -> theme, in themes.yaml order (the first is the default)
@@ -134,11 +121,25 @@ fn recolor(svg: &str, map: &[(u32, u32)]) -> String {
     out + rest
 }
 
+fn raw(name: &str) -> &'static str {
+    SVG.iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, d)| *d)
+        .unwrap_or_else(|| panic!("tex: no {name}"))
+}
+
 pub fn img(t: &Theme, name: &str) -> image::SvgImage {
-    let d = SVG.iter().find(|(n, _)| *n == name).map(|(_, d)| *d);
+    svg(name, &recolor(raw(name), t.map))
+}
+
+// An icon while its button is hovered: the stroke darkens (HOVER_STROKE), through the theme's map.
+pub const ICON_STROKE: u32 = 0x2F4A36;
+pub const HOVER_STROKE: u32 = 0x1E4B2C;
+pub fn icon_on(t: &Theme, name: &str) -> image::SvgImage {
+    let hex = |c: u32| recolor(&format!("#{c:06X}"), t.map);
     svg(
         name,
-        &recolor(d.unwrap_or_else(|| panic!("tex: no {name}")), t.map),
+        &recolor(raw(name), t.map).replace(&hex(ICON_STROKE), &hex(HOVER_STROKE)),
     )
 }
 

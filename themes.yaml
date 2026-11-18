@@ -46,7 +46,6 @@
   recolor:
     # shared: glyphs & outlines
     0x6C643E: 0x163254 # glyph fill
-    0x2B2A1E: 0x0C1D32 # dark glyph fill
     0x1E4B2C: 0x122844 # outline
     0x2F4A36: 0x293D52 # outline
     # shared: button face gradient, light to darker

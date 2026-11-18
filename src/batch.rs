@@ -164,8 +164,8 @@ pub fn batch_overlay(
     let mut start = NumInput::new(ox + 452, oy + 160, 0, 999, false);
     start.set_value(1);
     let mut renum = button::Button::new(ox + 452, oy + 192, 172, 28, "Numeruj od tego");
-    let mut send = btn("wyslij", ox + 16, oy + 456);
-    let mut stop_s = btn("przerwij", ox + 84, oy + 456);
+    let mut send = tool_btn("bg_lime", "icon_wyslij", "Wyślij", ox + 16, oy + 456);
+    let mut stop_s = tool_btn("bg_orange", "icon_przerwij", "Przerwij", ox + 84, oy + 456);
     sg.end();
 
     // ---- tab "Odczytaj" ----
@@ -184,8 +184,8 @@ pub fn batch_overlay(
         24,
         13,
     );
-    let mut read = btn("odczytaj", ox + 16, oy + 456);
-    let mut stop_r = btn("przerwij", ox + 84, oy + 456);
+    let mut read = tool_btn("bg_rose", "icon_odczytaj", "Odczytaj", ox + 16, oy + 456);
+    let mut stop_r = tool_btn("bg_orange", "icon_przerwij", "Przerwij", ox + 84, oy + 456);
     rg.end();
     rg.hide();
 

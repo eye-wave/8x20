@@ -210,23 +210,32 @@ fn days_in(y: u32, m: u32) -> u32 {
 // Stops at the first day whose materials are not published yet; days without verses are skipped.
 // sequential, no retries; add when the site starts rate-limiting.
 fn fetch(year: u32, month: u32, progress: &dyn Fn(u32, u32)) -> Result<Vec<Psalm>, String> {
-    // attohttpc with rustls (see Cargo.toml): works on Windows 7
+    // libcurl (static, Schannel on Windows): no combase.dll, works on Windows 7
+    let net = |e: curl::Error| format!("{NETWORK} ({e})");
+    let mut h = curl::easy::Easy::new();
+    h.useragent("Bot Izajasz").map_err(net)?;
+    h.follow_location(true).map_err(net)?;
     let n = days_in(year, month);
     let mut out = vec![];
     for day in 1..=n {
         progress(day - 1, n);
         let url = format!("https://niezbednik.niedziela.pl/liturgia/{year}-{month:02}-{day:02}");
-        let r = ureq::get(&url)
-            .header("User-Agent", "Bot Izajasz")
-            .call()
-            .map_err(|e| format!("{NETWORK} ({e})"))?;
-        if r.status().as_u16() != 200 {
-            return Err(format!("{NETWORK} (HTTP {})", r.status().as_u16()));
+        h.url(&url).map_err(net)?;
+        let mut buf = vec![];
+        {
+            let mut t = h.transfer();
+            t.write_function(|d| {
+                buf.extend_from_slice(d);
+                Ok(d.len())
+            })
+            .map_err(net)?;
+            t.perform().map_err(net)?;
         }
-        let html = r
-            .into_body()
-            .read_to_string()
-            .map_err(|e| format!("{NETWORK} ({e})"))?;
+        let code = h.response_code().map_err(net)?;
+        if code != 200 {
+            return Err(format!("{NETWORK} (HTTP {code})"));
+        }
+        let html = String::from_utf8_lossy(&buf).into_owned();
         match scrape(&html, (year, month, day)) {
             Ok(p) => out.push(p),
             Err(e) if e == NOT_COMPLETED => break,

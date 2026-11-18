@@ -216,15 +216,17 @@ fn fetch(year: u32, month: u32, progress: &dyn Fn(u32, u32)) -> Result<Vec<Psalm
     for day in 1..=n {
         progress(day - 1, n);
         let url = format!("https://niezbednik.niedziela.pl/liturgia/{year}-{month:02}-{day:02}");
-        let r = attohttpc::get(&url)
+        let r = ureq::get(&url)
             .header("User-Agent", "Bot Izajasz")
-            .timeout(std::time::Duration::from_secs(30))
-            .send()
+            .call()
             .map_err(|e| format!("{NETWORK} ({e})"))?;
         if r.status().as_u16() != 200 {
             return Err(format!("{NETWORK} (HTTP {})", r.status().as_u16()));
         }
-        let html = r.text().map_err(|e| format!("{NETWORK} ({e})"))?;
+        let html = r
+            .into_body()
+            .read_to_string()
+            .map_err(|e| format!("{NETWORK} ({e})"))?;
         match scrape(&html, (year, month, day)) {
             Ok(p) => out.push(p),
             Err(e) if e == NOT_COMPLETED => break,

@@ -1,11 +1,11 @@
 use super::*;
 
-// Folder picker; empty path = cancelled. Windows: rfd (modern Vista+ dialog, also fine on 7); elsewhere: fltk's.
+// Folder picker; empty path = cancelled. Windows 10+ (feature "rfd"): modern dialog; otherwise (incl. Win7): fltk's.
 // no parent window handed to rfd; pass fltk's HWND via set_parent if it ever opens behind the app.
 pub fn pick_dir() -> PathBuf {
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "rfd"))]
     return rfd::FileDialog::new().pick_folder().unwrap_or_default();
-    #[cfg(not(windows))]
+    #[cfg(not(all(windows, feature = "rfd")))]
     {
         let mut d = NativeFileChooser::new(NativeFileChooserType::BrowseDir);
         d.show();

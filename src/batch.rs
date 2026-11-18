@@ -350,9 +350,7 @@ pub fn batch_overlay(
                 set_dot(false);
                 return st2.set_label("Wybierz port szeregowy");
             };
-            let mut d = NativeFileChooser::new(NativeFileChooserType::BrowseDir);
-            d.show();
-            let dir = d.filename();
+            let dir = pick_dir();
             if dir.as_os_str().is_empty() {
                 return;
             }

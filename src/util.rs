@@ -1,5 +1,18 @@
 use super::*;
 
+// Folder picker; empty path = cancelled. Windows: rfd (modern Vista+ dialog, also fine on 7); elsewhere: fltk's.
+// no parent window handed to rfd; pass fltk's HWND via set_parent if it ever opens behind the app.
+pub fn pick_dir() -> PathBuf {
+    #[cfg(windows)]
+    return rfd::FileDialog::new().pick_folder().unwrap_or_default();
+    #[cfg(not(windows))]
+    {
+        let mut d = NativeFileChooser::new(NativeFileChooserType::BrowseDir);
+        d.show();
+        d.filename()
+    }
+}
+
 // "[#####               ] 25%"
 pub fn bar(done: u32, total: u32) -> String {
     let p = (done * 100 / total.max(1)).min(100);

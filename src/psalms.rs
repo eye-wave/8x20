@@ -439,9 +439,7 @@ fn render(p: &Psalm, f: Format) -> Vec<u8> {
 
 // Ask for a folder (UI thread), write "<Miesiąc> <rok>/NNN.<ext>" there.
 fn save(files: Vec<(String, Vec<u8>)>, dir_name: &str) -> Result<usize, String> {
-    let mut d = NativeFileChooser::new(NativeFileChooserType::BrowseDir);
-    d.show();
-    let base = d.filename();
+    let base = pick_dir();
     if base.as_os_str().is_empty() {
         return Err("anulowano".into());
     }

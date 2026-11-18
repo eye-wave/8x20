@@ -1,6 +1,6 @@
 use super::*;
 
-pub const FONT: Font = Font::Courier; // monospace
+pub const FONT: Font = Font::Courier; // monospace: slot is remapped to the embedded font by `load_mono`
 pub const SIZE: i32 = 30;
 
 // Editor box is exactly COLS x ROWS character cells (fltk text margins: 3px sides, 1px top/bottom)
@@ -172,4 +172,16 @@ pub fn rules(
         }
         false
     });
+}
+
+// Embedded Noto Sans Mono (Latin + Latin Extended, OFL, see font/OFL.txt): the same 0.6em x 1.362em cell on every OS,
+// so the editor matches the background art on Windows too (its Courier New fallback is much shorter per line).
+// fltk can only load fonts from a file, so it goes through the temp dir; falls back to system Courier on failure.
+pub fn load_mono() {
+    let p = std::env::temp_dir().join("tablica-mono.ttf");
+    if fs::write(&p, include_bytes!("../font/mono.ttf")).is_ok()
+        && let Ok(name) = Font::load_font(&p)
+    {
+        Font::set_font(FONT, &name);
+    }
 }

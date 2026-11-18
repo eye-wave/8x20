@@ -52,6 +52,7 @@ fn main() {
     }
     app::set_visible_focus(false);
     app::set_font_size(14);
+    editor::load_mono(); // before any widget measures FONT
 
     CUR.store(pick_theme(), Relaxed); // seasonal / saved theme, before any widget is built
     tint();

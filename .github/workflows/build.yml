@@ -22,11 +22,13 @@ jobs:
               name: windows-7-64,
               os: windows-latest,
               target: x86_64-win7-windows-msvc,
+              flags: --no-default-features,
             }
           - {
               name: windows-7-32,
               os: windows-latest,
               target: i686-win7-windows-msvc,
+              flags: --no-default-features,
             }
           - {
               name: linux-64,
@@ -51,7 +53,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake pkg-config libx11-dev libxext-dev libxft-dev libxinerama-dev \
-            libxcursor-dev libxrender-dev libxfixes-dev libpango1.0-dev libgl1-mesa-dev libglu1-mesa-dev libudev-dev
+            libxcursor-dev libxrender-dev libxfixes-dev libpango1.0-dev libgl1-mesa-dev libglu1-mesa-dev libudev-dev \
+            libssl-dev
 
       - name: Linux 32 deps
         if: matrix.multilib
@@ -60,7 +63,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake pkg-config gcc-multilib g++-multilib libx11-dev:i386 libxext-dev:i386 \
             libxft-dev:i386 libxinerama-dev:i386 libxcursor-dev:i386 libxrender-dev:i386 libxfixes-dev:i386 \
-            libpango1.0-dev:i386 libgl1-mesa-dev:i386 libglu1-mesa-dev:i386 libudev-dev:i386
+            libpango1.0-dev:i386 libgl1-mesa-dev:i386 libglu1-mesa-dev:i386 libudev-dev:i386 \
+            libssl-dev:i386
           echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig" >> "$GITHUB_ENV"
 
@@ -73,7 +77,7 @@ jobs:
       #   run: cargo test --release
 
       - name: Build
-        run: cargo --config .cargo/size.toml build --release --target ${{ matrix.target }}
+        run: cargo --config .cargo/size.toml build --release --target ${{ matrix.target }} ${{ matrix.flags }}
 
       - uses: actions/upload-artifact@v7
         with:

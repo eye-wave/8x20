@@ -206,36 +206,59 @@ fn days_in(y: u32, m: u32) -> u32 {
     }
 }
 
+const HOST: &str = "niezbednik.niedziela.pl";
+const USER_AGENT: &str = "Bot Izajasz";
+
+// HTTPS via rustls
+#[cfg(feature = "tls")]
+fn get(path: &str) -> Result<String, String> {
+    let net = |e| format!("{NETWORK} ({e})");
+    let r = minreq::get(format!("http://{HOST}{path}"))
+        .with_header("User-Agent", USER_AGENT)
+        .with_max_redirects(0)
+        .send()
+        .map_err(net)?;
+
+    if r.status_code != 200 {
+        return Err(format!("{NETWORK} (HTTP {})", r.status_code));
+    }
+
+    r.as_str().map(str::to_owned).map_err(net)
+}
+
+#[cfg(not(feature = "tls"))]
+fn get(path: &str) -> Result<String, String> {
+    use std::io::{Read, Write};
+    let net = |e: std::io::Error| format!("{NETWORK} ({e})");
+    let mut s = std::net::TcpStream::connect((HOST, 80)).map_err(net)?;
+    // HTTP/1.0 + close = no chunked decoding, no keep-alive, no redirects; no timeout either
+    write!(
+        s,
+        "GET {path} HTTP/1.0\r\nHost: {HOST}\r\nUser-Agent: {USER_AGENT}\r\n\r\n"
+    )
+    .map_err(net)?;
+    let mut buf = vec![];
+    s.read_to_end(&mut buf).map_err(net)?;
+    let raw = String::from_utf8_lossy(&buf);
+    let (head, body) = raw
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| NETWORK.to_string())?;
+    let status = head.lines().next().unwrap_or("");
+    if !status.contains(" 200") {
+        return Err(format!("{NETWORK} ({status})"));
+    }
+    Ok(body.to_string())
+}
+
 // Scrape the psalms of one month. Calls `progress(done, total)` as it goes (drives the bar).
 // Stops at the first day whose materials are not published yet; days without verses are skipped.
 // sequential, no retries; add when the site starts rate-limiting.
 fn fetch(year: u32, month: u32, progress: &dyn Fn(u32, u32)) -> Result<Vec<Psalm>, String> {
-    // libcurl (static, Schannel on Windows): no combase.dll, works on Windows 7
-    let net = |e: curl::Error| format!("{NETWORK} ({e})");
-    let mut h = curl::easy::Easy::new();
-    h.useragent("Bot Izajasz").map_err(net)?;
-    h.follow_location(true).map_err(net)?;
     let n = days_in(year, month);
     let mut out = vec![];
     for day in 1..=n {
         progress(day - 1, n);
-        let url = format!("https://niezbednik.niedziela.pl/liturgia/{year}-{month:02}-{day:02}");
-        h.url(&url).map_err(net)?;
-        let mut buf = vec![];
-        {
-            let mut t = h.transfer();
-            t.write_function(|d| {
-                buf.extend_from_slice(d);
-                Ok(d.len())
-            })
-            .map_err(net)?;
-            t.perform().map_err(net)?;
-        }
-        let code = h.response_code().map_err(net)?;
-        if code != 200 {
-            return Err(format!("{NETWORK} (HTTP {code})"));
-        }
-        let html = String::from_utf8_lossy(&buf).into_owned();
+        let html = get(&format!("/liturgia/{year}-{month:02}-{day:02}"))?;
         match scrape(&html, (year, month, day)) {
             Ok(p) => out.push(p),
             Err(e) if e == NOT_COMPLETED => break,

@@ -24,6 +24,7 @@ mod overlay;
 mod psalms;
 mod sign;
 mod theme;
+mod update;
 mod util;
 mod widgets;
 
@@ -275,6 +276,7 @@ fn main() {
     #[cfg(windows)]
     crate::util::taskbar(&win);
     let _ = ed.take_focus(); // start typing in the page editor
+    update::check();
 
     // alignment acts on the focused editor (body if none); clicks don't steal focus (visible_focus is off)
     let go: Rc<dyn Fn(Al)> = Rc::new({

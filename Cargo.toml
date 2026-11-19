@@ -3,9 +3,10 @@ cargo-features = ["profile-rustflags"]
 
 [package]
 name = "tablica"
-version = "0.2.15-dev"
+version = "0.2.16-dev"
 edition = "2024"
 repository = "github.com/eye-wave/8x20"
+license = "GPL-3.0-or-later"
 
 [dependencies]
 dirs = "7.0.0"

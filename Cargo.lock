@@ -812,7 +812,7 @@ dependencies = [
 
 [[package]]
 name = "tablica"
-version = "0.2.15-dev"
+version = "0.2.16-dev"
 dependencies = [
  "dirs",
  "encoding_rs",

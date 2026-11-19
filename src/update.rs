@@ -4,7 +4,7 @@ use super::*;
 // newer than ours, show a popup. Network errors are silent.
 const HOST: &str = "raw.githubusercontent.com";
 const PATH: &str = "/eye-wave/8x20/main/Cargo.toml";
-const PAGE: &str = "https://nightly.link/eye-wave/8x20/workflows/build/main";
+const PAGE: &str = "https://nightly.link/eye-wave/8x20/workflows/build/main"; // opened by the popup's "Pobierz"
 
 // `version = "x.y.z"` under [package]
 fn remote_version(toml: &str) -> Option<&str> {
@@ -26,7 +26,34 @@ fn parse(v: &str) -> ([u32; 3], bool) {
     ([next(), next(), next()], !pre)
 }
 
-pub fn check() {
+// Open a URL in the default browser.
+// `start` via cmd (no console flash) / xdg-open; no ShellExecute binding to own.
+fn open(url: &str) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .spawn();
+    }
+    #[cfg(not(windows))]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+}
+
+static BUSY: AtomicBool = AtomicBool::new(false);
+
+// Setting "Sprawdzaj aktualizacje" (default on): the startup check.
+pub fn auto_on() -> bool {
+    cfg_get("updates").as_deref() != Some("0")
+}
+
+// `manual` (the button) also reports "up to date" and failures; the startup check stays silent unless
+// there is something new.
+pub fn check(manual: bool) {
+    if BUSY.swap(true, Relaxed) {
+        return;
+    }
     let me = env!("CARGO_PKG_VERSION");
     bg(
         || {
@@ -35,10 +62,19 @@ pub fn check() {
                 .and_then(|t| remote_version(&t).map(str::to_owned))
         },
         move |v| {
-            if let Some(v) = v.filter(|v| parse(v) > parse(me)) {
-                about(&format!(
-                    "Dostępna nowa wersja: {v}\n(używasz {me})\n\n{PAGE}"
-                ));
+            BUSY.store(false, Relaxed);
+            match v {
+                Some(v) if parse(&v) > parse(me) => {
+                    let msg = format!("Dostępna nowa wersja: {v}\n(używasz {me})\n\nPobrać teraz?");
+                    if ask(&msg, &["Pobierz", "Później"]) == Some(0) {
+                        open(PAGE);
+                    }
+                }
+                Some(_) if manual => about(&format!("Używasz najnowszej wersji ({me}).")),
+                None if manual => {
+                    about("Nie udało się sprawdzić aktualizacji.\nSprawdź połączenie z internetem.")
+                }
+                _ => {}
             }
         },
     );

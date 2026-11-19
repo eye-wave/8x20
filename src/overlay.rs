@@ -19,7 +19,7 @@ pub fn more_overlay(
     // outgrows the window. `dy` = how much taller the dialog is than with the old single thumbnail row.
     let rows = THEMES.len().div_ceil(3) as i32;
     let vh = rows.min(2) * 156 - 8;
-    let dy = vh - 100;
+    let dy = vh - 100 + 32; // + the update row
     let (ox, oy) = ((960 - 460) / 2, (728 - (296 + dy)) / 2);
     let mut g = group::Group::new(0, 0, 960, 728, None);
 
@@ -55,8 +55,16 @@ pub fn more_overlay(
     let mut themes = button::CheckButton::new(ox + 16, oy + 104, 428, 24, "Motywy okolicznościowe");
     themes.set_value(seasonal_on());
 
+    // update check: auto-check at startup (saved) + check right now
+    let mut upd = button::CheckButton::new(ox + 16, oy + 136, 260, 24, "Sprawdzaj aktualizacje");
+    upd.set_value(update::auto_on());
+    upd.set_callback(|c| cfg_set("updates", if c.value() { "1" } else { "0" }));
+    let mut now = button::Button::new(ox + 296, oy + 134, 148, 28, "Sprawdź teraz");
+    style_btn(&mut now);
+    now.set_callback(|_| update::check(true));
+
     // theme thumbnails (radio: one selected) with their names; clicking one applies and saves it
-    let mut sc = group::Scroll::new(ox + 16, oy + 136, 428, vh, None);
+    let mut sc = group::Scroll::new(ox + 16, oy + 168, 428, vh, None);
     sc.set_type(group::ScrollType::Vertical);
     sc.set_scrollbar_size(12);
     sc.set_frame(FrameType::FlatBox);
@@ -65,7 +73,7 @@ pub fn more_overlay(
     for (i, (key, t)) in THEMES.iter().enumerate() {
         let (cx, cy) = (
             ox + 16 + 136 * (i % 3) as i32,
-            oy + 136 + 156 * (i / 3) as i32,
+            oy + 168 + 156 * (i / 3) as i32,
         );
         let mut thumb = png("bg", t.bg);
         thumb.scale(120, 91, true, true);

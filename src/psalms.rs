@@ -211,9 +211,8 @@ const USER_AGENT: &str = "Bot Izajasz";
 // HTTPS via rustls
 pub fn https_get(host: &str, path: &str) -> Result<String, String> {
     let net = |e| format!("{NETWORK} ({e})");
-    let r = minreq::get(format!("http://{host}{path}"))
+    let r = minreq::get(format!("https://{host}{path}"))
         .with_header("User-Agent", USER_AGENT)
-        .with_max_redirects(0)
         .send()
         .map_err(net)?;
 

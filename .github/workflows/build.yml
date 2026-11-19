@@ -78,6 +78,14 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      - name: Diagnose Windows API dependencies
+        if: contains(matrix.target, 'win7')
+        shell: bash
+        run: |
+          cargo tree --target ${{ matrix.target }} -i windows-sys@0.61.0 || true
+          cargo tree --target ${{ matrix.target }} -i windows-sys@0.60.2 || true
+          cargo tree --target ${{ matrix.target }} -d
+
       # - name: Test (native targets only)
       #   if: matrix.name == 'windows-10-64' || matrix.name == 'linux-64'
       #   run: cargo test --release

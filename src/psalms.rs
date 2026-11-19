@@ -208,9 +208,7 @@ fn days_in(y: u32, m: u32) -> u32 {
 const HOST: &str = "niezbednik.niedziela.pl";
 const USER_AGENT: &str = "Bot Izajasz";
 
-// HTTPS via ureq/rustls everywhere except the Windows 7 build (--no-default-features --features ossl):
-// there OpenSSL (vendored) is tried, since the other TLS stacks failed to launch on Win7.
-#[cfg(feature = "tls")]
+// HTTPS via rustls
 pub fn https_get(host: &str, path: &str) -> Result<String, String> {
     let net = |e| format!("{NETWORK} ({e})");
     let r = minreq::get(format!("http://{host}{path}"))
@@ -224,41 +222,6 @@ pub fn https_get(host: &str, path: &str) -> Result<String, String> {
     }
 
     r.as_str().map(str::to_owned).map_err(net)
-}
-
-#[cfg(all(not(feature = "tls"), feature = "ossl"))]
-pub fn https_get(host: &str, path: &str) -> Result<String, String> {
-    use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
-    use std::io::{Read, Write};
-    let net = |e: &dyn std::fmt::Display| format!("{NETWORK} ({e})");
-    let mut c = SslConnector::builder(SslMethod::tls()).map_err(|e| net(&e))?;
-    // ponytail: no certificate check, OpenSSL has no Windows trust store; public pages only
-    c.set_verify(SslVerifyMode::NONE);
-    let tcp = std::net::TcpStream::connect((host, 443)).map_err(|e| net(&e))?;
-    let mut s = c.build().connect(host, tcp).map_err(|e| net(&e))?;
-    // ponytail: HTTP/1.0 + close = no chunked decoding, no keep-alive, no redirects; no timeout either
-    write!(
-        s,
-        "GET {path} HTTP/1.0\r\nHost: {host}\r\nUser-Agent: {USER_AGENT}\r\n\r\n"
-    )
-    .map_err(|e| net(&e))?;
-    let mut buf = vec![];
-    let _ = s.read_to_end(&mut buf); // a missing TLS close_notify is an error after the data; judge by the data
-    let raw = String::from_utf8_lossy(&buf);
-    let (head, body) = raw
-        .split_once("\r\n\r\n")
-        .ok_or_else(|| NETWORK.to_string())?;
-    let status = head.lines().next().unwrap_or("");
-    if !status.contains(" 200") {
-        return Err(format!("{NETWORK} ({status})"));
-    }
-    Ok(body.to_string())
-}
-
-// Probe build (--no-default-features): no TLS at all, only for checking what the exe imports.
-#[cfg(not(any(feature = "tls", feature = "ossl")))]
-pub fn https_get(_: &str, _: &str) -> Result<String, String> {
-    Err(format!("{NETWORK} (built without TLS)"))
 }
 
 // Scrape the psalms of one month. Calls `progress(done, total)` as it goes (drives the bar).

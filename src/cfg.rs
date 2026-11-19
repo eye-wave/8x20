@@ -1,7 +1,17 @@
 use super::*;
 
-pub static CONFIG_PATH: LazyLock<PathBuf> =
-    LazyLock::new(|| dirs::config_dir().unwrap().join(".tablica_cfg"));
+pub static CONFIG_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
+    let var = |k| {
+        std::env::var_os(k)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    var("APPDATA")
+        .or_else(|| var("XDG_CONFIG_HOME"))
+        .or_else(|| var("HOME").map(|h| h.join(".config")))
+        .unwrap_or_default()
+        .join(".tablica_cfg")
+});
 
 // Config = "key=value" lines. Parsing is split from file I/O so it can be tested.
 pub fn parse_get(t: &str, k: &str) -> Option<String> {

@@ -22,13 +22,13 @@ jobs:
               name: windows-7-64,
               os: windows-latest,
               target: x86_64-win7-windows-msvc,
-              flags: "--no-default-features --features ossl", # no rfd, no rustls; vendored OpenSSL
+              flags: --no-default-features, # probe: no rfd
             }
           - {
               name: windows-7-32,
               os: windows-latest,
               target: i686-win7-windows-msvc,
-              flags: "--no-default-features --features ossl",
+              flags: --no-default-features,
             }
           - {
               name: linux-64,
@@ -78,20 +78,30 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Diagnose Windows API dependencies
-        if: contains(matrix.target, 'win7')
-        shell: bash
-        run: |
-          cargo tree --target ${{ matrix.target }} -i windows-sys@0.61.0 || true
-          cargo tree --target ${{ matrix.target }} -i windows-sys@0.60.2 || true
-          cargo tree --target ${{ matrix.target }} -d
-
       # - name: Test (native targets only)
       #   if: matrix.name == 'windows-10-64' || matrix.name == 'linux-64'
       #   run: cargo test --release
 
       - name: Build
         run: cargo --config .cargo/size.toml build --release --target ${{ matrix.target }} ${{ matrix.flags }}
+
+      - name: Win7 import check (which DLLs/functions the exe pulls in)
+        if: contains(matrix.target, 'win7')
+        shell: bash
+        continue-on-error: true
+        run: |
+          pip install -q pefile
+          python - "target/${{ matrix.target }}/release/tablica.exe" <<'PY'
+          import pefile, sys
+          p = pefile.PE(sys.argv[1])
+          for attr in ("DIRECTORY_ENTRY_IMPORT", "DIRECTORY_ENTRY_DELAY_IMPORT"):
+              for e in getattr(p, attr, []):
+                  dll = e.dll.decode().lower()
+                  names = [i.name.decode() if i.name else f"#{i.ordinal}" for i in e.imports]
+                  print(attr[16:], dll, len(names))
+                  if "combase" in dll or dll.startswith("api-ms"):
+                      print("   ", ", ".join(names))
+          PY
 
       - uses: actions/upload-artifact@v7
         with:

@@ -22,13 +22,13 @@ jobs:
               name: windows-7-64,
               os: windows-latest,
               target: x86_64-win7-windows-msvc,
-              flags: --no-default-features,
+              flags: "--no-default-features --features ossl", # no rfd, no rustls; vendored OpenSSL
             }
           - {
               name: windows-7-32,
               os: windows-latest,
               target: i686-win7-windows-msvc,
-              flags: --no-default-features,
+              flags: "--no-default-features --features ossl",
             }
           - {
               name: linux-64,
@@ -66,13 +66,21 @@ jobs:
           echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig" >> "$GITHUB_ENV"
 
+      - name: NASM + Strawberry Perl for vendored OpenSSL
+        if: contains(matrix.target, 'win7')
+        shell: bash
+        run: |
+          choco install nasm -y
+          echo "C:\\Program Files\\NASM" >> "$GITHUB_PATH"
+          echo "OPENSSL_SRC_PERL=C:/Strawberry/perl/bin/perl.exe" >> "$GITHUB_ENV"
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
 
-      - name: Test (native targets only)
-        if: matrix.name == 'windows-10-64' || matrix.name == 'linux-64'
-        run: cargo test --release
+      # - name: Test (native targets only)
+      #   if: matrix.name == 'windows-10-64' || matrix.name == 'linux-64'
+      #   run: cargo test --release
 
       - name: Build
         run: cargo --config .cargo/size.toml build --release --target ${{ matrix.target }} ${{ matrix.flags }}

@@ -3,7 +3,7 @@ cargo-features = ["profile-rustflags"]
 
 [package]
 name = "tablica"
-version = "0.2.14-dev"
+version = "0.2.15-dev"
 edition = "2024"
 repository = "github.com/eye-wave/8x20"
 
@@ -14,12 +14,14 @@ fltk = "1.5"
 minreq = { version = "3", default-features = false, features = [
   "https-rustls",
 ], optional = true }
+openssl = { version = "0.10", features = ["vendored"], optional = true }
 regex-lite = "0.1.9"
 serialport = "4.10"
 
 [features]
 default = ["rfd", "tls"]
 tls = ["dep:minreq"]
+ossl = ["dep:openssl"]
 
 [target.'cfg(windows)'.dependencies]
 rfd = { version = "0.18", default-features = false, optional = true }

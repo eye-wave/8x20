@@ -227,17 +227,22 @@ fn get(path: &str) -> Result<String, String> {
 
 #[cfg(not(feature = "tls"))]
 fn get(path: &str) -> Result<String, String> {
+    use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
     use std::io::{Read, Write};
-    let net = |e: std::io::Error| format!("{NETWORK} ({e})");
-    let mut s = std::net::TcpStream::connect((HOST, 80)).map_err(net)?;
+    let net = |e: &dyn std::fmt::Display| format!("{NETWORK} ({e})");
+    let mut c = SslConnector::builder(SslMethod::tls()).map_err(|e| net(&e))?;
+    // no certificate check, OpenSSL has no Windows trust store; public pages only
+    c.set_verify(SslVerifyMode::NONE);
+    let tcp = std::net::TcpStream::connect((HOST, 443)).map_err(|e| net(&e))?;
+    let mut s = c.build().connect(HOST, tcp).map_err(|e| net(&e))?;
     // HTTP/1.0 + close = no chunked decoding, no keep-alive, no redirects; no timeout either
     write!(
         s,
-        "GET {path} HTTP/1.0\r\nHost: {HOST}\r\nUser-Agent: {USER_AGENT}\r\n\r\n"
+        "GET {path} HTTP/1.0\r\nHost: {HOST}\r\nUser-Agent: Bot Izajasz\r\n\r\n"
     )
-    .map_err(net)?;
+    .map_err(|e| net(&e))?;
     let mut buf = vec![];
-    s.read_to_end(&mut buf).map_err(net)?;
+    let _ = s.read_to_end(&mut buf); // a missing TLS close_notify is an error after the data; judge by the data
     let raw = String::from_utf8_lossy(&buf);
     let (head, body) = raw
         .split_once("\r\n\r\n")
@@ -248,6 +253,9 @@ fn get(path: &str) -> Result<String, String> {
     }
     Ok(body.to_string())
 }
+
+#[cfg(all(not(feature = "tls"), not(feature = "ossl")))]
+compile_error!("build with the default features, or --no-default-features --features ossl");
 
 // Scrape the psalms of one month. Calls `progress(done, total)` as it goes (drives the bar).
 // Stops at the first day whose materials are not published yet; days without verses are skipped.

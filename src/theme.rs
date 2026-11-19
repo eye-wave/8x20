@@ -3,7 +3,9 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering::Relaxed},
 };
 
-use fltk::{app, enums::Color, image};
+use std::cell::RefCell;
+
+use fltk::{app, draw, enums::Color, image, prelude::*};
 
 // ---- themes ----------------------------------------------------------------------------------
 // The theme list lives in themes.yaml; build.rs (themes_build.rs) turns it into the `THEMES` table
@@ -185,6 +187,26 @@ pub fn pick_theme() -> usize {
         .filter(|_| seasonal_on())
         .or_else(|| crate::cfg_get("theme").and_then(|k| by(&k)))
         .unwrap_or(0)
+}
+
+thread_local! { static BG: RefCell<Option<(usize, image::PngImage)>> = const { RefCell::new(None) }; }
+
+// Repaint the backdrop under a widget. The button faces are translucent at the corners, so
+// redrawing a face alone would stack it on the previous frame (fringes after a few hovers).
+// assumes the widget's parent is the root group the backdrop sits in, at its origin.
+pub fn bg_under(w: &impl WidgetExt) {
+    let o = w.parent().map_or((0, 0), |p| (p.x(), p.y()));
+    BG.with_borrow_mut(|c| {
+        let i = CUR.load(Relaxed);
+        if c.as_ref().is_none_or(|(k, _)| *k != i) {
+            *c = Some((i, png("bg", theme().bg)));
+        }
+        draw::push_clip(w.x(), w.y(), w.w(), w.h());
+        if let Some((_, img)) = c {
+            img.draw(o.0, o.1, 960, 728);
+        }
+        draw::pop_clip();
+    });
 }
 
 pub fn png(name: &str, d: &[u8]) -> image::PngImage {

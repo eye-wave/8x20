@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::AtomicU32;
 
 // Folder picker; empty path = cancelled. Windows 10+ (feature "rfd"): modern dialog; otherwise (incl. Win7): fltk's.
 // no parent window handed to rfd; pass fltk's HWND via set_parent if it ever opens behind the app.
@@ -18,6 +19,31 @@ pub fn bar(done: u32, total: u32) -> String {
     let p = (done * 100 / total.max(1)).min(100);
     let n = (p / 5) as usize;
     format!("[{}{}] {p}%", "#".repeat(n), " ".repeat(20 - n))
+}
+
+// Progress of a background job: the worker stores, the UI timer reads the label.
+pub struct Progress {
+    done: AtomicU32,
+    total: AtomicU32,
+}
+
+impl Progress {
+    pub const fn new() -> Self {
+        Self {
+            done: AtomicU32::new(0),
+            total: AtomicU32::new(1),
+        }
+    }
+    pub fn set(&self, done: u32, total: u32) {
+        self.done.store(done, Relaxed);
+        self.total.store(total, Relaxed);
+    }
+    pub fn done(&self, done: u32) {
+        self.done.store(done, Relaxed);
+    }
+    pub fn label(&self) -> String {
+        bar(self.done.load(Relaxed), self.total.load(Relaxed))
+    }
 }
 
 // Selected port name (index 0 is the "not selected" entry). The names are kept separately because

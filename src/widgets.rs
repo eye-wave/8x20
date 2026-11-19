@@ -9,6 +9,8 @@ pub fn win_btn(name: &'static str, x: i32, y: i32) -> button::Button {
     let mut b = button::Button::new(x, y, i.w(), i.h(), None);
     b.set_frame(FrameType::NoBox);
     b.set_image(Some(i));
+    b.super_draw_first(false); // backdrop first, then the default draw puts the face on it
+    b.draw(|b| bg_under(&*b));
     b.handle(move |b, ev| match ev {
         Event::Enter | Event::Leave => {
             b.set_image(Some(face(theme(), ev == Event::Enter)));
@@ -60,6 +62,7 @@ pub fn face_btn(
     b.draw({
         let hot = hot.clone();
         move |b| {
+            bg_under(&*b);
             if cache.0 != CUR.load(Relaxed) {
                 cache = (CUR.load(Relaxed), faces(theme()));
             }

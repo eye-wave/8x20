@@ -37,7 +37,8 @@ use numinput::NumInput;
 use overlay::*;
 use psalms::*;
 use theme::{
-    CUR, THEMES, Theme, apply_theme, icon_on, img, pick_theme, png, seasonal_on, skin, theme, tint,
+    CUR, THEMES, Theme, apply_theme, bg_under, icon_on, img, pick_theme, png, seasonal_on, skin,
+    theme, tint,
 };
 use util::*;
 use widgets::*;

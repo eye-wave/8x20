@@ -1,5 +1,5 @@
 use super::*;
-use std::{cell::RefCell, sync::atomic::AtomicU32};
+use std::cell::RefCell;
 
 // "Przetwarzanie wsadowe": two tabs.
 //  Wyślij   - pick many .txt files, give each a slot number (no duplicates), send them one after another.
@@ -7,8 +7,7 @@ use std::{cell::RefCell, sync::atomic::AtomicU32};
 // Buttons are still plain FLTK (no styling) except the three texture buttons taken from the navbar.
 
 static CANCEL: AtomicBool = AtomicBool::new(false);
-static DONE: AtomicU32 = AtomicU32::new(0);
-static TOTAL: AtomicU32 = AtomicU32::new(1);
+static PROGRESS: Progress = Progress::new();
 
 type Rows = Rc<RefCell<Vec<(PathBuf, NumInput)>>>;
 
@@ -90,15 +89,14 @@ fn launch<T: Send + 'static>(
         return;
     }
     CANCEL.store(false, Relaxed);
-    DONE.store(0, Relaxed);
-    TOTAL.store(total, Relaxed);
+    PROGRESS.set(0, total);
     let mut st = st.clone();
     st.set_label_font(FONT); // monospace so the bar doesn't jiggle
     st.set_label(&bar(0, total));
     let (mut tick, b) = (st.clone(), busy.clone());
     app::add_timeout3(0.1, move |h| {
         if b.get() {
-            tick.set_label(&bar(DONE.load(Relaxed), TOTAL.load(Relaxed)));
+            tick.set_label(&PROGRESS.label());
             app::repeat_timeout3(0.1, h);
         }
     });
@@ -319,7 +317,7 @@ pub fn batch_overlay(
                             return Err("przerwano".into());
                         }
                         sign::write(&p, *n, pages).map_err(|e| format!("{file}: {e}"))?;
-                        DONE.store(k as u32 + 1, Relaxed);
+                        PROGRESS.done(k as u32 + 1);
                     }
                     Ok(jobs.len())
                 },
@@ -370,7 +368,7 @@ pub fn batch_overlay(
                             sign::read(&p, n as u16, 0).map_err(|e| format!("{n:03}: {e}"))?;
                         fs::write(dir.join(format!("{n:03}.txt")), file_bytes(&pages))
                             .map_err(|e| e.to_string())?;
-                        DONE.store(n - a + 1, Relaxed);
+                        PROGRESS.done(n - a + 1);
                     }
                     Ok(b - a + 1)
                 },

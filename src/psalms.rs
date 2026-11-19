@@ -2,7 +2,7 @@ use crate::theme::civil;
 
 use super::*;
 use regex_lite::{Captures, Regex};
-use std::sync::atomic::{AtomicU8, AtomicU32};
+use std::sync::atomic::AtomicU8;
 
 // "Psalmy na miesiąc": pick year + month + one or more output formats, download, save into a folder
 // "<Miesiąc> <rok>" (one file per day and format, as the old TypeScript tool did).
@@ -27,8 +27,7 @@ const FORMATS: &[(Format, &str, &str, &str, &str)] = &[
 
 static FORMATS_ON: AtomicU8 = AtomicU8::new(0b11);
 static BUSY: AtomicBool = AtomicBool::new(false);
-static DONE: AtomicU32 = AtomicU32::new(0);
-static TOTAL: AtomicU32 = AtomicU32::new(1);
+static PROGRESS: Progress = Progress::new();
 
 const NOT_COMPLETED: &str = "Materiały nie zostały jeszcze uzupełnione";
 const NOTHING_FOUND: &str = "Nie znaleziono wersów na tej stronie";
@@ -488,8 +487,7 @@ fn save(files: Vec<(String, Vec<u8>)>, dir_name: &str) -> Result<usize, String> 
 }
 
 fn progress(done: u32, total: u32) {
-    DONE.store(done, Relaxed);
-    TOTAL.store(total, Relaxed);
+    PROGRESS.set(done, total);
 }
 
 fn start(year: u32, month: u32, status: &Frame) {
@@ -503,7 +501,7 @@ fn start(year: u32, month: u32, status: &Frame) {
     let mut tick = st.clone();
     app::add_timeout3(0.1, move |h| {
         if BUSY.load(Relaxed) {
-            tick.set_label(&bar(DONE.load(Relaxed), TOTAL.load(Relaxed)));
+            tick.set_label(&PROGRESS.label());
             app::repeat_timeout3(0.1, h);
         }
     });

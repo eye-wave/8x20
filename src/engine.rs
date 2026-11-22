@@ -103,9 +103,9 @@ fn center_pad(t: &str) -> usize {
     let tr = c.iter().rev().take_while(|x| CLOSE.contains(**x)).count();
     let core = c.len().saturating_sub(ld + tr);
     if core == 0 {
-        return COLS.saturating_sub(c.len()) / 2;
+        return COLS.saturating_sub(c.len()).div_ceil(2); // odd leftover space goes left
     }
-    let spaces = (COLS.saturating_sub(core) / 2).saturating_sub(ld);
+    let spaces = COLS.saturating_sub(core).div_ceil(2).saturating_sub(ld);
     spaces.saturating_sub((spaces + c.len()).saturating_sub(COLS))
 }
 
@@ -183,6 +183,7 @@ pub fn rejoin(e: &mut text::TextEditor, b: &mut text::TextBuffer, pos: i32) {
 // Align the selected lines; with no selection, the whole page the caret is on.
 pub fn align(e: &mut text::TextEditor, b: &mut text::TextBuffer, a: Al) {
     let p = e.insert_position();
+    let row = b.count_lines(0, p); // caret stays on its row so the view doesn't jump
     let (ls, le) = match b.selection_position().filter(|(s, z)| s != z) {
         Some((s, z)) => {
             let (s, z) = (s.min(z), s.max(z));
@@ -207,7 +208,8 @@ pub fn align(e: &mut text::TextEditor, b: &mut text::TextBuffer, a: Al) {
         .join("\n");
     b.replace(ls, le, &new);
     b.unselect();
-    e.set_insert_position(ls + new.len() as i32);
+    let ln = line_pos(b, row);
+    e.set_insert_position(b.line_end(ln));
     e.show_insert_position();
 }
 
@@ -263,6 +265,12 @@ pub fn put(
         let (ls, le) = (b.line_start(pos), b.line_end(pos));
         let len = b.text_range(ls, le).unwrap_or_default().chars().count();
         let room = max_lines.is_none_or(|m| b.count_lines(0, b.length()) + 1 < m);
+        // typing a space at the end of a full line = Enter
+        let ch = if !wrap && ch == ' ' && len >= COLS && pos == le {
+            '\n'
+        } else {
+            ch
+        };
         if !wrap
             && ch != ' '
             && ch != '\n'
@@ -391,7 +399,7 @@ mod tests {
         assert_eq!(align_line("word", Al::Justify), "word");
         let j = align_line("ab cd", Al::Justify); // justified lines must be undoable
         assert_eq!(align_line(&j, Al::Left), "ab cd");
-        assert_eq!(align_line(&j, Al::Center), format!("{}ab cd", sp(7)));
+        assert_eq!(align_line(&j, Al::Center), format!("{}ab cd", sp(8)));
     }
 
     #[test]
@@ -436,7 +444,8 @@ mod tests {
             align_line("abcdef!?", Al::Center),
             format!("{}abcdef!?", sp(7))
         );
-        assert_eq!(align_line("...", Al::Center), format!("{}...", sp(8)));
+        assert_eq!(align_line("...", Al::Center), format!("{}...", sp(9))); // odd leftover goes left
+        assert_eq!(align_line("abc", Al::Center), format!("{}abc", sp(9)));
         assert_eq!(
             align_line("abcdefghijklmnopqrs.", Al::Center),
             "abcdefghijklmnopqrs."

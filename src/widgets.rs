@@ -225,10 +225,19 @@ fn dialog(msg: &str, buttons: &[&str], icon: bool) -> Option<usize> {
     let c = &theme().colors;
     let (bw, gap) = (100, 10);
     let row = buttons.len() as i32 * (bw + gap) - gap;
+    let (ww, wh) = (360.max(row + 32), 150);
+    // open centred over the main window, so it lands on the monitor the app is on
+    let (x, y) = match app::first_window() {
+        Some(m) => (m.x() + (m.w() - ww) / 2, m.y() + (m.h() - wh) / 2),
+        None => (0, 0),
+    };
     let mut w = window::Window::default()
-        .with_size(360.max(row + 32), 150)
-        .with_label("Tablica")
-        .center_screen();
+        .with_pos(x, y)
+        .with_size(ww, wh)
+        .with_label("Tablica");
+    if app::first_window().is_none() {
+        w = w.center_screen();
+    }
     w.set_color(Color::from_hex(c.panel));
     let tx = if icon { 96 } else { 16 };
     if icon {

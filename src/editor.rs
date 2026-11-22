@@ -14,6 +14,9 @@ pub fn editor(
     pages: bool, // draw page separators
 ) -> (text::TextEditor, text::TextBuffer) {
     draw::set_font(FONT, SIZE);
+    // +2px text slack so a full 20-char line (and the caret after it) never triggers fltk's
+    // horizontal scroll (Windows glyph advance is a hair over the rounded width); taken from the bar.
+    let pad = if bar > 2 { 2 } else { 0 };
     let w = COLS as i32 * draw::width("M").round() as i32 + 6 + bar;
     let h = ROWS * draw::height() + 2 + slack; // slack: spare px so rounding never makes the last row scroll
     let buf = text::TextBuffer::default();
@@ -33,7 +36,7 @@ pub fn editor(
         let mut e = ed.clone();
         move |t| colour(&mut e, t)
     });
-    ed.set_scrollbar_size(bar);
+    ed.set_scrollbar_size(bar - pad);
     ed.set_scrollbar_align(Align::Right); // vertical bar only: fltk shows the horizontal one only if TOP/BOTTOM is set
     // Tab: not handled by the editor, so fltk moves focus to the next widget instead of inserting.
     ed.add_key_binding(Key::Tab, Shortcut::None, |_, _| 0);

@@ -2,7 +2,15 @@ name: build
 
 on:
   push:
+    paths:
+      - "**.rs"
+      - "Cargo.toml"
+      - "themes.yaml"
+      - ".github/workflows/**"
   pull_request:
+    paths:
+      - "**.rs"
+      - "themes.yaml"
   workflow_dispatch:
 
 jobs:
@@ -65,14 +73,6 @@ jobs:
             libpango1.0-dev:i386 libgl1-mesa-dev:i386 libglu1-mesa-dev:i386 libudev-dev:i386
           echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig" >> "$GITHUB_ENV"
-
-      - name: NASM + Strawberry Perl for vendored OpenSSL
-        if: contains(matrix.target, 'win7')
-        shell: bash
-        run: |
-          choco install nasm -y
-          echo "C:\\Program Files\\NASM" >> "$GITHUB_PATH"
-          echo "OPENSSL_SRC_PERL=C:/Strawberry/perl/bin/perl.exe" >> "$GITHUB_ENV"
 
       - uses: Swatinem/rust-cache@v2
         with:

@@ -287,7 +287,7 @@ pub fn batch_overlay(
             let mut ns: Vec<u16> = jobs.iter().map(|j| j.1).collect();
             ns.sort();
             let list = if ns.len() > 1 && ns.windows(2).all(|w| w[1] == w[0] + 1) {
-                format!("{:03}–{:03}", ns[0], ns[ns.len() - 1]) // no gaps: a plain range
+                format!("{:03}-{:03}", ns[0], ns[ns.len() - 1]) // no gaps: a plain range
             } else {
                 let j = ns
                     .iter()

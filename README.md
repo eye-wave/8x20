@@ -1,6 +1,6 @@
 # Tablica
 
-Program do pisania tekstów i wysyłania ich do cyfrowego rzutnika tekstów **CRT-20+** ([TUGAL](https://tugal.eu)) przez port szeregowy. Nowa nowoczesna wersja programu _Tablica Świetlna 8x20_ napisana w języku Rust. Działa na Windows 7+ i Linuksie.
+Program do pisania tekstów i wysyłania ich do cyfrowego rzutnika tekstów **CRT-20+** ([TUGAL](https://tugal.eu)) przez port szeregowy. Nowa odświeżona wersja programu _Tablica Świetlna 8x20_ napisana w języku Rust. Działa na Windows 7+ i na Linuksie.
 
 <img src="tex/bg.png" width="302">
 

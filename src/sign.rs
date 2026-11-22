@@ -70,7 +70,14 @@ fn frame(cmd: u8, payload: &[u8]) -> Vec<u8> {
     out
 }
 
-// read until idle timeout; replies' CRC unchecked.
+// True once a reply (after the exe-style leading FFs) has all the bytes its own length field promises.
+// Lets rx return immediately instead of waiting out the idle gap after every frame.
+fn complete(v: &[u8]) -> bool {
+    let r = &v[v.iter().position(|&x| x != 0xFF).unwrap_or(v.len())..];
+    r.len() >= 3 && r.len() >= (u16::from_be_bytes([r[1], r[2]]) as usize).max(5)
+}
+
+// read until the reply is complete or the line goes idle; replies' CRC unchecked.
 fn rx(p: &mut dyn SerialPort) -> io::Result<Vec<u8>> {
     let (mut v, mut b) = (vec![], [0u8; 256]);
     p.set_timeout(Duration::from_secs(3))?; // first byte may be slow
@@ -80,6 +87,9 @@ fn rx(p: &mut dyn SerialPort) -> io::Result<Vec<u8>> {
             Ok(0) => break,
             Ok(n) => {
                 v.extend_from_slice(&b[..n]);
+                if complete(&v) {
+                    break;
+                }
                 p.set_timeout(Duration::from_millis(300))?; // then an idle gap ends the reply
             }
             Err(e) if e.kind() == ErrorKind::TimedOut => break,
@@ -173,6 +183,26 @@ pub fn write(port: &str, n: u16, pages: &Pages) -> io::Result<()> {
         ack(send(&mut *p, &frame(4, &pl))?)?;
     }
     ack(send(&mut *p, &frame(2, &n.to_be_bytes()))?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reply_complete() {
+        assert!(!complete(&[]) && !complete(&[0xFF, 0xFF]) && !complete(&[5, 0]));
+        let mut r = vec![0xFF, 0xFF, 5, 0, 165];
+        assert!(!complete(&r));
+        r.resize(2 + 165, 0);
+        assert!(complete(&r));
+    }
+}
+
+/// Is a sign answering on this port? Reads title page of slot 1 (changes nothing on the sign).
+pub fn probe(port: &str) -> io::Result<()> {
+    STOP.store(false, Relaxed); // probes only run while no real transfer does
+    page(&mut *open(port)?, &frame(1, &1u16.to_be_bytes())).map(|_| ())
 }
 
 pub fn ports() -> Vec<String> {

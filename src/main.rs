@@ -163,24 +163,20 @@ fn main() {
     rules(&mut ed, &buf, None, kw2, Some(page));
 
     // status bar
-    let mut com = lbl("COM-", 60, 676, 100, 24, 16);
-    com.set_label_color(Color::from_hex(theme().colors.label));
     let mut msg = lbl("", 300, 670, 345, 24, 13); // the status widget in the middle of the bar
     msg.set_align(Align::Center | Align::Inside);
-    msg.set_label_color(Color::from_hex(theme().colors.label)); // same as the COM label
+    msg.set_label_color(Color::from_hex(theme().colors.label));
     skin({
-        let (mut c, mut m) = (com.clone(), msg.clone());
+        let mut m = msg.clone();
         move |t| {
-            for w in [&mut c, &mut m] {
-                w.set_label_color(Color::from_hex(t.colors.label));
-                w.redraw();
-            }
+            m.set_label_color(Color::from_hex(t.colors.label));
+            m.redraw();
         }
     });
     // connection status dot, left of the port dropdown: green after a successful read/write,
     // red after a failure and whenever another port is picked
     let ok = Arc::new(AtomicBool::new(false));
-    let mut dot = Frame::new(709, 679, 15, 15, None);
+    let mut dot = Frame::new(272, 679, 15, 15, None);
     paint_dot(&mut dot, theme(), false);
     skin({
         let (mut d, ok) = (dot.clone(), ok.clone());
@@ -193,7 +189,7 @@ fn main() {
     let mut names = sign::ports();
     names.sort_by(|a, b| natural_cmp(a, b).then_with(|| a.cmp(b)));
     let ports = Rc::new(names);
-    let mut port = menu::Choice::new(730, 674, 210, 26, None);
+    let mut port = menu::Choice::new(58, 674, 210, 26, None);
     port.add_choice("Port szeregowy niewybrany");
     for name in ports.iter() {
         port.add_choice(&name.replace('/', "\\/")); // a bare '/' would start a submenu
@@ -232,23 +228,58 @@ fn main() {
         let mut p = port.clone();
         move |t| paint(&mut p, t)
     });
-    port.set_callback({
-        let (mut com, set_dot, ports) = (com.clone(), set_dot.clone(), ports.clone());
-        move |p| {
-            com.set_label(&port_of(p, &ports).unwrap_or_else(|| "COM-".into()));
+    let busy = Rc::new(Cell::new(false)); // one serial job at a time, shared with the batch dialog
+    // Try the selected port in the background: the dot turns green if a sign answers. Runs on launch
+    // and on every port change; a newer pick makes older results stale (gen), so cycling ports is fine.
+    let probe_gen = Rc::new(Cell::new(0u32));
+    let probe: Rc<dyn Fn()> = Rc::new({
+        let (port, ports, busy, set_dot, msg) = (
+            port.clone(),
+            ports.clone(),
+            busy.clone(),
+            set_dot.clone(),
+            msg.clone(),
+        );
+        move || {
+            probe_gen.set(probe_gen.get() + 1);
             set_dot(false);
+            let Some(name) = port_of(&port, &ports) else {
+                return;
+            };
+            if busy.get() {
+                return;
+            }
+            let (id, gen_) = (probe_gen.get(), probe_gen.clone());
+            let (set_dot, mut msg, busy) = (set_dot.clone(), msg.clone(), busy.clone());
+            bg(
+                move || sign::probe(&name).is_ok(),
+                move |up| {
+                    if gen_.get() == id && !busy.get() {
+                        set_dot(up);
+                        msg.set_label(if up {
+                            "Tablica gotowa"
+                        } else {
+                            "Brak odpowiedzi tablicy"
+                        });
+                    }
+                },
+            );
         }
     });
 
-    // reselect the port that last worked (if it is still plugged in)
+    {
+        let probe_clone = probe.clone();
+        port.set_callback(move |_| probe_clone());
+    }
+
+    // reselect the port that last worked (if it is still plugged in) and check it
     if let Some(i) = cfg_get("port").and_then(|s| ports.iter().position(|p| *p == s)) {
         port.set_value(i as i32 + 1);
-        com.set_label(&ports[i]);
+        probe();
     }
 
     // "Więcej" overlay: last child of root, so it sits on top of everything
     let psalms = psalms_overlay(&ed);
-    let busy = Rc::new(Cell::new(false)); // one serial job at a time, shared with the batch dialog
     let batch = batch_overlay(&ed, &port, &ports, &set_dot, &busy);
     let overlay = more_overlay(&ed, &psalms, &batch);
     more.set_callback({

@@ -276,6 +276,7 @@ fn main() {
     #[cfg(windows)]
     crate::util::taskbar(&win);
     let _ = ed.take_focus(); // start typing in the page editor
+    update::cleanup();
     if update::auto_on() {
         update::check(false);
     }
